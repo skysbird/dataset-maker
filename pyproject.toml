@@ -66,3 +66,8 @@ cu128 = [
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[[tool.uv.index]]
+name = "aliyun"
+#url = "https://mirrors.aliyun.com/pypi/simple/"
+url = "http://mirrors.cloud.aliyuncs.com/pypi/simple/" # 内网
