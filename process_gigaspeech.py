@@ -485,6 +485,15 @@ def process_single_group(
         # Debug: check mapping results
         if not segment_mapping:
             print(f"Warning: No segments mapped for group {group_key}. Emilia segments: {len(emilia_segments)}, Original boundaries: {len(boundaries)}", file=sys.stderr)
+            if emilia_segments and boundaries:
+                # Debug: show time ranges to understand why mapping failed
+                print(f"  Emilia time range: {emilia_segments[0].get('start', 0):.2f}s - {emilia_segments[-1].get('end', 0):.2f}s", file=sys.stderr)
+                print(f"  Original time range: {boundaries[0][1]:.2f}s - {boundaries[-1][2]:.2f}s", file=sys.stderr)
+        else:
+            mapped_count = len(segment_mapping)
+            print(f"Debug: Mapped {mapped_count}/{len(boundaries)} segments. Sample mappings:", file=sys.stderr)
+            for seg_id, info in list(segment_mapping.items())[:3]:
+                print(f"  {seg_id}: speaker={info.get('speaker')}, overlap={info.get('overlap_ratio', 0):.2f}", file=sys.stderr)
         
         # Step 5: Create output entries
         for audio_file in audio_files:
