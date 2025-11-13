@@ -15,19 +15,78 @@ import argparse
 import json
 import sys
 import tempfile
+import traceback
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import librosa
-import numpy as np
-import soundfile as sf
-from tqdm import tqdm
+# 逐步导入并追踪错误
+print("开始导入模块...", file=sys.stderr)
 
-from emilia_pipeline import run_emilia_pipeline
-from safe_globals import register_torch_safe_globals
+try:
+    print("  [1/5] 导入基础库...", file=sys.stderr)
+    import librosa
+    print("    ✓ librosa", file=sys.stderr)
+except Exception as e:
+    print(f"    ✗ librosa 导入失败: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    raise
 
-register_torch_safe_globals()
+try:
+    import numpy as np
+    print("    ✓ numpy", file=sys.stderr)
+except Exception as e:
+    print(f"    ✗ numpy 导入失败: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    raise
+
+try:
+    import soundfile as sf
+    print("    ✓ soundfile", file=sys.stderr)
+except Exception as e:
+    print(f"    ✗ soundfile 导入失败: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    raise
+
+try:
+    from tqdm import tqdm
+    print("    ✓ tqdm", file=sys.stderr)
+except Exception as e:
+    print(f"    ✗ tqdm 导入失败: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    raise
+
+try:
+    print("  [2/5] 导入 safe_globals...", file=sys.stderr)
+    from safe_globals import register_torch_safe_globals
+    print("    ✓ safe_globals 模块导入成功", file=sys.stderr)
+except Exception as e:
+    print(f"    ✗ safe_globals 模块导入失败: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    raise
+
+try:
+    print("  [3/5] 调用 register_torch_safe_globals()...", file=sys.stderr)
+    register_torch_safe_globals()
+    print("    ✓ register_torch_safe_globals() 调用成功", file=sys.stderr)
+except Exception as e:
+    print(f"    ✗ register_torch_safe_globals() 调用失败: {e}", file=sys.stderr)
+    print("    ⚠ 这可能是导致 std::bad_alloc 的原因！", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    raise
+
+try:
+    print("  [4/5] 导入 emilia_pipeline...", file=sys.stderr)
+    print("    注意：这会触发 emilia_pipeline.py 的所有顶层导入", file=sys.stderr)
+    from emilia_pipeline import run_emilia_pipeline
+    print("    ✓ emilia_pipeline 导入成功", file=sys.stderr)
+except Exception as e:
+    print(f"    ✗ emilia_pipeline 导入失败: {e}", file=sys.stderr)
+    print("    ⚠ 这可能是导致 std::bad_alloc 的原因！", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    raise
+
+print("  [5/5] 所有导入完成", file=sys.stderr)
 
 
 def load_tsv(tsv_path: Path) -> Dict[str, str]:
