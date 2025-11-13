@@ -480,7 +480,7 @@ def process_gigaspeech(
     threads: int = 4,
     do_uvr: bool = True,
     forced_language: str = "th",
-    max_workers: int = 2,
+    max_workers: int = 1,
 ) -> None:
     """
     Main processing function for GigaSpeech 2 dataset.
@@ -547,60 +547,39 @@ def process_gigaspeech(
     jsonl_file = open(jsonl_path, "a", encoding="utf-8")
     
     try:
-        # Process groups concurrently
-        print(f"\nProcessing {len(groups_to_process)} groups with {max_workers} workers...")
-        
-        total_processed = 0
-        total_segments = 0
-        
-        # Use ThreadPoolExecutor for concurrent processing
-        # Note: Using threads instead of processes because GPU resources and model loading
-        # are better shared in threads, and we need to avoid duplicating model memory
-        from concurrent.futures import ThreadPoolExecutor
-        
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            futures = {}
-            worker_counter = 0
-            worker_counter_lock = threading.Lock()
+        # Process groups
+        if max_workers == 1:
+            # 单线程模式：直接串行处理，避免线程池开销和模型加载冲突
+            print(f"\nProcessing {len(groups_to_process)} groups sequentially...")
             
-            for idx, (group_key, audio_files) in enumerate(groups_to_process):
-                # 为每个任务分配 worker_id（循环使用，避免创建太多缓存目录）
-                with worker_counter_lock:
-                    worker_id = worker_counter % max_workers
-                    worker_counter += 1
-                
-                future = executor.submit(
-                    process_single_group,
-                    group_key,
-                    audio_files,
-                    transcript_map,
-                    gigaspeech_root,
-                    output_dir,
-                    config_path,
-                    silence_duration,
-                    batch_size,
-                    whisper_arch,
-                    threads,
-                    do_uvr,
-                    forced_language,
-                    idx,
-                    len(groups_to_process),
-                    worker_id,  # 传递 worker_id
-                )
-                futures[future] = (group_key, idx)
+            total_processed = 0
+            total_segments = 0
             
-            # Process completed tasks and write results
-            for future in as_completed(futures):
-                group_key, idx = futures[future]
+            for idx, (group_key, audio_files) in enumerate(tqdm(groups_to_process, desc="Processing groups")):
                 try:
-                    results = future.result()
+                    results = process_single_group(
+                        group_key,
+                        audio_files,
+                        transcript_map,
+                        gigaspeech_root,
+                        output_dir,
+                        config_path,
+                        silence_duration,
+                        batch_size,
+                        whisper_arch,
+                        threads,
+                        do_uvr,
+                        forced_language,
+                        idx,
+                        len(groups_to_process),
+                        worker_id=0,  # 单线程时 worker_id 始终为 0
+                    )
+                    
                     if results:
-                        # Thread-safe writing
-                        with write_lock:
-                            for entry in results:
-                                jsonl_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                                jsonl_file.flush()  # Ensure data is written immediately
+                        # 直接写入，无需锁（单线程）
+                        for entry in results:
+                            jsonl_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                            jsonl_file.flush()  # Ensure data is written immediately
                         total_processed += 1
                         total_segments += len(results)
                         print(f"✓ Processed group {idx+1}/{len(groups_to_process)}: {group_key} ({len(results)} segments)", file=sys.stderr)
@@ -609,6 +588,69 @@ def process_gigaspeech(
                 except Exception as e:
                     print(f"✗ Error processing group {group_key}: {e}", file=sys.stderr)
                     traceback.print_exc(file=sys.stderr)
+        else:
+            # 多线程模式：使用线程池并发处理
+            print(f"\nProcessing {len(groups_to_process)} groups with {max_workers} workers...")
+            
+            total_processed = 0
+            total_segments = 0
+            
+            # Use ThreadPoolExecutor for concurrent processing
+            # Note: Using threads instead of processes because GPU resources and model loading
+            # are better shared in threads, and we need to avoid duplicating model memory
+            from concurrent.futures import ThreadPoolExecutor
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                futures = {}
+                worker_counter = 0
+                worker_counter_lock = threading.Lock()
+                
+                for idx, (group_key, audio_files) in enumerate(groups_to_process):
+                    # 为每个任务分配 worker_id（循环使用，避免创建太多缓存目录）
+                    with worker_counter_lock:
+                        worker_id = worker_counter % max_workers
+                        worker_counter += 1
+                    
+                    future = executor.submit(
+                        process_single_group,
+                        group_key,
+                        audio_files,
+                        transcript_map,
+                        gigaspeech_root,
+                        output_dir,
+                        config_path,
+                        silence_duration,
+                        batch_size,
+                        whisper_arch,
+                        threads,
+                        do_uvr,
+                        forced_language,
+                        idx,
+                        len(groups_to_process),
+                        worker_id,  # 传递 worker_id
+                    )
+                    futures[future] = (group_key, idx)
+                
+                # Process completed tasks and write results
+                for future in as_completed(futures):
+                    group_key, idx = futures[future]
+                    try:
+                        results = future.result()
+                        if results:
+                            # Thread-safe writing
+                            with write_lock:
+                                for entry in results:
+                                    jsonl_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                                    jsonl_file.flush()  # Ensure data is written immediately
+                            total_processed += 1
+                            total_segments += len(results)
+                            print(f"✓ Processed group {idx+1}/{len(groups_to_process)}: {group_key} ({len(results)} segments)", file=sys.stderr)
+                        else:
+                            print(f"✗ Group {idx+1}/{len(groups_to_process)}: {group_key} produced no results", file=sys.stderr)
+                    except Exception as e:
+                        print(f"✗ Error processing group {group_key}: {e}", file=sys.stderr)
+                        traceback.print_exc(file=sys.stderr)
         
         print(f"\nProcessing complete!")
         print(f"  Processed groups: {total_processed}/{len(groups_to_process)}")
@@ -704,9 +746,9 @@ def main():
     parser.add_argument(
         "--max-workers",
         type=int,
-        default=2,
-        help="Maximum number of concurrent workers for processing groups (default: 2). "
-             "Note: Higher values may cause GPU memory issues.",
+        default=1,
+        help="Maximum number of concurrent workers for processing groups (default: 1). "
+             "Note: Set to 1 to avoid model loading conflicts. Higher values may cause GPU memory issues.",
     )
     
     args = parser.parse_args()
