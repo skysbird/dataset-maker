@@ -377,17 +377,43 @@ def process_single_group(
             combined_path = combined_audio_dir / combined_filename
             sf.write(str(combined_path), combined_audio, sr)
             
+            # Verify file was saved
+            if not combined_path.exists():
+                print(f"Error: Combined audio file was not saved: {combined_path}", file=sys.stderr)
+                return results
+            
+            print(f"Saved combined audio: {combined_path} ({len(combined_audio)/sr:.2f}s, {sr}Hz)", file=sys.stderr)
+            
         except Exception as e:
             print(f"Error combining group {group_key}: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             return results
         
         # Step 2: Process with Emilia pipeline
+        # Verify audio file exists before calling Emilia
+        if not combined_path.exists():
+            print(f"Error: Combined audio file does not exist: {combined_path}", file=sys.stderr)
+            return results
+        
+        # Check file size to ensure it's not empty
+        file_size = combined_path.stat().st_size
+        if file_size == 0:
+            print(f"Error: Combined audio file is empty: {combined_path}", file=sys.stderr)
+            return results
+        
+        audio_files_in_dir = list(combined_audio_dir.glob("*.wav"))
+        print(f"Found {len(audio_files_in_dir)} audio file(s) in {combined_audio_dir}: {[f.name for f in audio_files_in_dir]}", file=sys.stderr)
+        print(f"  File size: {file_size} bytes", file=sys.stderr)
+        
         try:
             # 延迟导入：只在真正需要时才加载重型模型
             from safe_globals import register_torch_safe_globals
             register_torch_safe_globals()
             from emilia_pipeline import run_emilia_pipeline
+            
+            # 确保使用绝对路径，避免路径问题
+            combined_audio_dir_abs = combined_audio_dir.resolve()
+            print(f"Calling Emilia pipeline with input folder: {combined_audio_dir_abs}", file=sys.stderr)
             
             # 使用共享的模型缓存目录，通过锁保护模型加载过程
             # 这样模型只需要下载一次，所有 worker 可以复用
@@ -397,7 +423,7 @@ def process_single_group(
             with _model_load_lock:
                 emilia_results = run_emilia_pipeline(
                     config_path,
-                    input_folder=str(combined_audio_dir),
+                    input_folder=str(combined_audio_dir_abs),
                     batch_size=batch_size,
                     compute_type="float16",
                     whisper_arch=whisper_arch,
