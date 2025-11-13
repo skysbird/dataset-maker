@@ -248,69 +248,94 @@ def map_emilia_segments_to_original(
     """
     mapping = {}
     
-    # Create a lookup for original boundaries
-    original_lookup = {seg_id: (start, end) for seg_id, start, end in original_boundaries}
-    
+    # Pre-process Emilia segments: extract speaker and add prefix
+    processed_emilia_segments = []
     for emilia_seg in emilia_segments:
         emilia_start = emilia_seg.get("start", 0.0)
         emilia_end = emilia_seg.get("end", emilia_start)
-        # Get speaker - handle None, empty string, or missing key
+        # Get speaker - pyannote.audio should always return speaker labels (e.g., "SPEAKER_00", "SPEAKER_01")
+        # Match original implementation: str(segment.get("speaker") or "SPEAKER_UNKNOWN").replace(" ", "_")
         emilia_speaker_raw = emilia_seg.get("speaker")
         if emilia_speaker_raw is None or emilia_speaker_raw == "":
+            # This should rarely happen, but keep as defensive programming
+            print(f"Warning: Emilia segment has no speaker: {emilia_seg}", file=sys.stderr)
             emilia_speaker = "SPEAKER_UNKNOWN"
         else:
             emilia_speaker = str(emilia_speaker_raw).replace(" ", "_")
         
         # Add output_name prefix to speaker ID to avoid conflicts across groups
         # This matches the original Emilia implementation: f"{manifest_dir.name}_{speaker_label}"
-        if output_name_prefix and emilia_speaker != "SPEAKER_UNKNOWN":
+        # Note: UNKNOWN also gets the prefix, matching original behavior
+        if output_name_prefix:
             emilia_speaker = f"{output_name_prefix}_{emilia_speaker}"
         
-        emilia_text = emilia_seg.get("text", "")
+        processed_emilia_segments.append({
+            "start": emilia_start,
+            "end": emilia_end,
+            "speaker": emilia_speaker,
+            "text": emilia_seg.get("text", ""),
+        })
+    
+    # For each original segment, find the best matching Emilia segment
+    # This ensures every original segment gets a speaker assignment
+    for seg_id, orig_start, orig_end in original_boundaries:
+        orig_duration = orig_end - orig_start
+        if orig_duration <= 0:
+            continue
         
-        # Find the original segment that best matches this Emilia segment
-        best_match = None
-        best_overlap = 0.0
+        best_emilia = None
+        best_overlap_ratio = 0.0
+        best_overlap_abs = 0.0
         
-        for seg_id, orig_start, orig_end in original_boundaries:
+        for emilia_seg in processed_emilia_segments:
+            emilia_start = emilia_seg["start"]
+            emilia_end = emilia_seg["end"]
+            
             # Calculate overlap
             overlap_start = max(emilia_start, orig_start)
             overlap_end = min(emilia_end, orig_end)
-            overlap = max(0.0, overlap_end - overlap_start)
+            overlap_abs = max(0.0, overlap_end - overlap_start)
+            
+            if overlap_abs <= 0:
+                continue
             
             # Calculate overlap ratio relative to original segment
-            orig_duration = orig_end - orig_start
-            if orig_duration > 0:
-                overlap_ratio = overlap / orig_duration
-            else:
-                overlap_ratio = 0.0
+            overlap_ratio = overlap_abs / orig_duration
             
-            # Prefer segments with higher overlap ratio
-            if overlap_ratio > best_overlap:
-                best_overlap = overlap_ratio
-                best_match = seg_id
+            # Prefer segments with higher overlap ratio, tie-break with absolute overlap
+            # Original implementation doesn't use thresholds - just find the best match
+            if overlap_ratio > best_overlap_ratio or (overlap_ratio == best_overlap_ratio and overlap_abs > best_overlap_abs):
+                best_overlap_ratio = overlap_ratio
+                best_overlap_abs = overlap_abs
+                best_emilia = emilia_seg
         
-        # If we found a good match (overlap > 30%), assign speaker
-        # Lower threshold to handle cases where segments don't align perfectly
-        if best_match and best_overlap > 0.3:
-            if best_match not in mapping:
-                mapping[best_match] = {
-                    "speaker": emilia_speaker,
-                    "emilia_text": emilia_text,
-                    "emilia_start": emilia_start,
-                    "emilia_end": emilia_end,
-                    "overlap_ratio": best_overlap,
-                }
-            else:
-                # If multiple Emilia segments match, use the one with higher overlap
-                if best_overlap > mapping[best_match].get("overlap_ratio", 0.0):
-                    mapping[best_match] = {
-                        "speaker": emilia_speaker,
-                        "emilia_text": emilia_text,
-                        "emilia_start": emilia_start,
-                        "emilia_end": emilia_end,
-                        "overlap_ratio": best_overlap,
-                    }
+        # Assign speaker if we found any overlap
+        # Original implementation doesn't use thresholds - just assign the best match
+        # Only require minimal overlap (> 0) to avoid completely unrelated segments
+        if best_emilia and best_overlap_abs > 0:
+            mapping[seg_id] = {
+                "speaker": best_emilia["speaker"],
+                "emilia_text": best_emilia["text"],
+                "emilia_start": best_emilia["start"],
+                "emilia_end": best_emilia["end"],
+                "overlap_ratio": best_overlap_ratio,
+                "overlap_abs": best_overlap_abs,
+            }
+        else:
+            # If no match found, assign UNKNOWN with prefix (matching original implementation)
+            unknown_speaker = "SPEAKER_UNKNOWN"
+            if output_name_prefix:
+                unknown_speaker = f"{output_name_prefix}_{unknown_speaker}"
+            mapping[seg_id] = {
+                "speaker": unknown_speaker,
+                "emilia_text": "",
+                "emilia_start": orig_start,
+                "emilia_end": orig_end,
+                "overlap_ratio": 0.0,
+                "overlap_abs": 0.0,
+            }
+            print(f"Warning: No Emilia segment matched for original segment {seg_id} "
+                  f"({orig_start:.2f}s - {orig_end:.2f}s), assigned {unknown_speaker}", file=sys.stderr)
     
     return mapping
 
@@ -532,8 +557,16 @@ def process_single_group(
             text = transcript_map.get(segment_id, "")
             
             # Get speaker info from mapping
+            # Note: mapping should always contain the segment_id (with UNKNOWN if no match)
+            # But keep fallback for safety
             speaker_info = segment_mapping.get(segment_id, {})
-            speaker_id = speaker_info.get("speaker", "SPEAKER_UNKNOWN")
+            speaker_id = speaker_info.get("speaker")
+            if not speaker_id:
+                # Fallback: should not happen, but ensure UNKNOWN also has prefix
+                unknown_speaker = "SPEAKER_UNKNOWN"
+                if output_name_for_prefix:
+                    unknown_speaker = f"{output_name_for_prefix}_{unknown_speaker}"
+                speaker_id = unknown_speaker
             emilia_text = speaker_info.get("emilia_text", "")
             
             # Calculate duration
