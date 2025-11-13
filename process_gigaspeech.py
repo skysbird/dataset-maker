@@ -232,7 +232,7 @@ def combine_audio_group(
 def map_emilia_segments_to_original(
     emilia_segments: List[Dict[str, Any]],
     original_boundaries: List[Tuple[str, float, float]],
-    group_key: str = "",
+    output_name_prefix: str = "",
 ) -> Dict[str, Dict[str, Any]]:
     """
     Map Emilia output segments back to original GigaSpeech segments.
@@ -240,7 +240,8 @@ def map_emilia_segments_to_original(
     Args:
         emilia_segments: List of segments from Emilia output JSON
         original_boundaries: List of (segment_id, start_time, end_time) from merged audio
-        group_key: Group identifier (e.g., "143/143303") to prefix speaker IDs
+        output_name_prefix: Output name from Emilia (manifest_dir.name) to prefix speaker IDs.
+                           This matches the original Emilia implementation in gradio_interface.py
     
     Returns:
         Dict mapping original segment_id to Emilia segment info
@@ -250,9 +251,6 @@ def map_emilia_segments_to_original(
     # Create a lookup for original boundaries
     original_lookup = {seg_id: (start, end) for seg_id, start, end in original_boundaries}
     
-    # Normalize group_key for use as prefix (replace "/" with "_")
-    group_prefix = group_key.replace("/", "_") if group_key else ""
-    
     for emilia_seg in emilia_segments:
         emilia_start = emilia_seg.get("start", 0.0)
         emilia_end = emilia_seg.get("end", emilia_start)
@@ -261,11 +259,12 @@ def map_emilia_segments_to_original(
         if emilia_speaker_raw is None or emilia_speaker_raw == "":
             emilia_speaker = "SPEAKER_UNKNOWN"
         else:
-            emilia_speaker = str(emilia_speaker_raw)
+            emilia_speaker = str(emilia_speaker_raw).replace(" ", "_")
         
-        # Add group prefix to speaker ID to avoid conflicts across groups
-        if group_prefix and emilia_speaker != "SPEAKER_UNKNOWN":
-            emilia_speaker = f"{group_prefix}_{emilia_speaker}"
+        # Add output_name prefix to speaker ID to avoid conflicts across groups
+        # This matches the original Emilia implementation: f"{manifest_dir.name}_{speaker_label}"
+        if output_name_prefix and emilia_speaker != "SPEAKER_UNKNOWN":
+            emilia_speaker = f"{output_name_prefix}_{emilia_speaker}"
         
         emilia_text = emilia_seg.get("text", "")
         
@@ -459,6 +458,9 @@ def process_single_group(
         
         # Step 3: Extract Emilia segments
         emilia_segments = []
+        output_name_for_prefix = ""  # Will be used as prefix for speaker IDs
+        combined_stem = combined_filename.replace(".wav", "")
+        
         if not emilia_results:
             print(f"Warning: No Emilia results returned for group {group_key}", file=sys.stderr)
         else:
@@ -470,7 +472,6 @@ def process_single_group(
                 available_names.append(output_name)
                 # Try to match with our combined filename
                 output_name_with_ext = f"{output_name}.wav"
-                combined_stem = combined_filename.replace(".wav", "")
                 
                 # More flexible matching
                 if (output_name_with_ext == combined_filename or 
@@ -478,17 +479,23 @@ def process_single_group(
                     combined_stem in output_name or
                     output_name in combined_stem):
                     emilia_segments = segments
+                    output_name_for_prefix = output_name  # Use matched output_name
                     print(f"Matched Emilia result: {output_name} -> {combined_filename} ({len(segments)} segments)", file=sys.stderr)
                     break
             
             if not emilia_segments:
                 print(f"Warning: Could not match Emilia results for group {group_key}", file=sys.stderr)
-                print(f"  Looking for: {combined_filename} (stem: {combined_filename.replace('.wav', '')})", file=sys.stderr)
+                print(f"  Looking for: {combined_filename} (stem: {combined_stem})", file=sys.stderr)
                 print(f"  Available: {available_names[:5]}...", file=sys.stderr)
                 # Try to use the first result if only one exists
                 if len(emilia_results) == 1:
-                    _, emilia_segments = emilia_results[0]
+                    manifest_path, emilia_segments = emilia_results[0]
+                    output_name_for_prefix = manifest_path.parent.name  # Use the output_name from the only result
                     print(f"  Using the only available result ({len(emilia_segments)} segments)", file=sys.stderr)
+        
+        # Fallback: if we still don't have output_name, use combined_stem
+        if not output_name_for_prefix:
+            output_name_for_prefix = combined_stem
         
         # Debug: check segments format and speaker information
         if emilia_segments:
@@ -498,10 +505,11 @@ def process_single_group(
             print(f"Debug: Has speaker field: {'speaker' in sample_seg}", file=sys.stderr)
             print(f"Debug: Sample speaker values (first 10): {speakers_in_segments}", file=sys.stderr)
             print(f"Debug: Total segments: {len(emilia_segments)}", file=sys.stderr)
+            print(f"Debug: Using output_name prefix: {output_name_for_prefix}", file=sys.stderr)
         
         # Step 4: Map results to original segments
-        # Pass group_key to prefix speaker IDs and avoid conflicts across groups
-        segment_mapping = map_emilia_segments_to_original(emilia_segments, boundaries, group_key=group_key)
+        # Pass output_name to prefix speaker IDs, matching original Emilia implementation
+        segment_mapping = map_emilia_segments_to_original(emilia_segments, boundaries, output_name_prefix=output_name_for_prefix)
         
         # Debug: check mapping results
         if not segment_mapping:
