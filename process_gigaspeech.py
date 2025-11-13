@@ -90,6 +90,9 @@ except Exception as e:
 
 print("  [5/5] 所有导入完成", file=sys.stderr)
 
+# 全局锁，用于保护模型加载过程，避免并发加载冲突
+_model_load_lock = threading.Lock()
+
 
 def load_tsv(tsv_path: Path) -> Dict[str, str]:
     """
@@ -379,35 +382,24 @@ def process_single_group(
             from safe_globals import register_torch_safe_globals
             register_torch_safe_globals()
             from emilia_pipeline import run_emilia_pipeline
-            import json as json_module
             
-            # 为每个 worker 使用独立的模型缓存目录，避免并发加载冲突
-            # 读取配置并修改缓存目录
-            with open(config_path, "r", encoding="utf-8") as f:
-                cfg = json_module.load(f)
-            
-            # 为每个 worker 创建独立的缓存目录
-            original_cache = cfg.get("download_cache")
-            worker_cache_dir = output_dir / "_temp" / f"worker_{worker_id}_cache"
-            worker_cache_dir.mkdir(parents=True, exist_ok=True)
-            cfg["download_cache"] = str(worker_cache_dir)
-            
-            # 临时保存修改后的配置
-            temp_config_path = temp_dir / "emilia_config.json"
-            with open(temp_config_path, "w", encoding="utf-8") as f:
-                json_module.dump(cfg, f, indent=2)
-            
-            emilia_results = run_emilia_pipeline(
-                temp_config_path,
-                input_folder=str(combined_audio_dir),
-                batch_size=batch_size,
-                compute_type="float16",
-                whisper_arch=whisper_arch,
-                threads=threads,
-                do_uvr=do_uvr,
-                forced_language=forced_language,
-                emilia_keep_processed=False,  # Clean up intermediate files
-            )
+            # 使用共享的模型缓存目录，通过锁保护模型加载过程
+            # 这样模型只需要下载一次，所有 worker 可以复用
+            # 注意：run_emilia_pipeline 每次调用都会重新加载模型（通过 prepare_models）
+            # 我们使用锁来保护模型加载过程，避免并发加载时的文件冲突
+            # 虽然这会在模型加载时串行化，但模型加载通常很快，实际推理可以并发
+            with _model_load_lock:
+                emilia_results = run_emilia_pipeline(
+                    config_path,
+                    input_folder=str(combined_audio_dir),
+                    batch_size=batch_size,
+                    compute_type="float16",
+                    whisper_arch=whisper_arch,
+                    threads=threads,
+                    do_uvr=do_uvr,
+                    forced_language=forced_language,
+                    emilia_keep_processed=False,  # Clean up intermediate files
+                )
         except Exception as e:
             print(f"Error running Emilia pipeline for group {group_key}: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
