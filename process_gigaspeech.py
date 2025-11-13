@@ -338,6 +338,7 @@ def process_single_group(
     forced_language: str,
     group_index: int,
     total_groups: int,
+    worker_id: int = 0,
 ) -> List[Dict[str, Any]]:
     """
     Process a single audio group: combine -> Emilia -> map -> return results.
@@ -378,9 +379,26 @@ def process_single_group(
             from safe_globals import register_torch_safe_globals
             register_torch_safe_globals()
             from emilia_pipeline import run_emilia_pipeline
+            import json as json_module
+            
+            # 为每个 worker 使用独立的模型缓存目录，避免并发加载冲突
+            # 读取配置并修改缓存目录
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json_module.load(f)
+            
+            # 为每个 worker 创建独立的缓存目录
+            original_cache = cfg.get("download_cache")
+            worker_cache_dir = output_dir / "_temp" / f"worker_{worker_id}_cache"
+            worker_cache_dir.mkdir(parents=True, exist_ok=True)
+            cfg["download_cache"] = str(worker_cache_dir)
+            
+            # 临时保存修改后的配置
+            temp_config_path = temp_dir / "emilia_config.json"
+            with open(temp_config_path, "w", encoding="utf-8") as f:
+                json_module.dump(cfg, f, indent=2)
             
             emilia_results = run_emilia_pipeline(
-                config_path,
+                temp_config_path,
                 input_folder=str(combined_audio_dir),
                 batch_size=batch_size,
                 compute_type="float16",
@@ -551,7 +569,15 @@ def process_gigaspeech(
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             futures = {}
+            worker_counter = 0
+            worker_counter_lock = threading.Lock()
+            
             for idx, (group_key, audio_files) in enumerate(groups_to_process):
+                # 为每个任务分配 worker_id（循环使用，避免创建太多缓存目录）
+                with worker_counter_lock:
+                    worker_id = worker_counter % max_workers
+                    worker_counter += 1
+                
                 future = executor.submit(
                     process_single_group,
                     group_key,
@@ -568,6 +594,7 @@ def process_gigaspeech(
                     forced_language,
                     idx,
                     len(groups_to_process),
+                    worker_id,  # 传递 worker_id
                 )
                 futures[future] = (group_key, idx)
             
