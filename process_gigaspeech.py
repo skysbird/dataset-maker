@@ -13,8 +13,8 @@ Usage:
 
 import argparse
 import json
+import shutil
 import sys
-import tempfile
 import traceback
 from collections import defaultdict
 from pathlib import Path
@@ -348,10 +348,13 @@ def process_gigaspeech(
     all_results = []
     processed_groups = 0
     
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = Path(temp_dir)
-        combined_audio_dir = temp_path / "combined_audio"
-        combined_audio_dir.mkdir(parents=True, exist_ok=True)
+    # 在项目目录中创建临时目录，而不是使用系统 /tmp
+    temp_dir = output_dir / "_temp"
+    temp_path = temp_dir
+    combined_audio_dir = temp_path / "combined_audio"
+    combined_audio_dir.mkdir(parents=True, exist_ok=True)
+    
+    try:
         
         # Step 1: Combine audio groups
         print("\nStep 1: Combining audio groups...")
@@ -499,6 +502,12 @@ def process_gigaspeech(
         print(f"  Processed groups: {len(group_boundaries)}")
         print(f"  Total segments: {len(all_results)}")
         print(f"  Output: {jsonl_path}")
+    
+    finally:
+        # 清理临时目录
+        if temp_dir.exists():
+            print(f"\nCleaning up temporary directory: {temp_dir}", file=sys.stderr)
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def main():
