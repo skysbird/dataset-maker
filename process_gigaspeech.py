@@ -358,7 +358,17 @@ def process_single_group(
     
     try:
         # Create temporary directory for this group
-        temp_dir = output_dir / "_temp" / f"group_{group_index}"
+        # 注意：get_audio_files 会跳过包含 "_processed" 的目录
+        # 如果 output_dir 或其路径中包含 "_processed"，需要将临时目录放在一个不包含 "_processed" 的位置
+        # 方案：将临时目录放在项目根目录（output_dir 的某个祖先目录）下，使用简单的名字
+        output_path_str = str(output_dir)
+        if "_processed" in output_path_str:
+            # 使用项目根目录下的固定临时目录，名字不包含 "_processed"
+            project_root = Path(__file__).parent.resolve()
+            temp_base = project_root / "gigaspeech_temp"
+        else:
+            temp_base = output_dir / "temp"
+        temp_dir = temp_base / f"group_{group_index}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         combined_audio_dir = temp_dir / "combined_audio"
         combined_audio_dir.mkdir(parents=True, exist_ok=True)
@@ -612,7 +622,15 @@ def process_gigaspeech(
         return
     
     # Create temporary directory
-    temp_dir = output_dir / "_temp"
+    # 注意：get_audio_files 会跳过包含 "_processed" 的目录
+    # 如果 output_dir 或其路径中包含 "_processed"，需要将临时目录放在一个不包含 "_processed" 的位置
+    output_path_str = str(output_dir)
+    if "_processed" in output_path_str:
+        # 使用项目根目录下的固定临时目录，名字不包含 "_processed"
+        project_root = Path(__file__).parent.resolve()
+        temp_dir = project_root / "gigaspeech_temp"
+    else:
+        temp_dir = output_dir / "temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     
     # File lock for thread-safe writing
