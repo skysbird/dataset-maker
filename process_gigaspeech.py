@@ -251,7 +251,12 @@ def map_emilia_segments_to_original(
     for emilia_seg in emilia_segments:
         emilia_start = emilia_seg.get("start", 0.0)
         emilia_end = emilia_seg.get("end", emilia_start)
-        emilia_speaker = emilia_seg.get("speaker", "SPEAKER_UNKNOWN")
+        # Get speaker - handle None, empty string, or missing key
+        emilia_speaker_raw = emilia_seg.get("speaker")
+        if emilia_speaker_raw is None or emilia_speaker_raw == "":
+            emilia_speaker = "SPEAKER_UNKNOWN"
+        else:
+            emilia_speaker = str(emilia_speaker_raw)
         emilia_text = emilia_seg.get("text", "")
         
         # Find the original segment that best matches this Emilia segment
@@ -276,8 +281,9 @@ def map_emilia_segments_to_original(
                 best_overlap = overlap_ratio
                 best_match = seg_id
         
-        # If we found a good match (overlap > 50%), assign speaker
-        if best_match and best_overlap > 0.5:
+        # If we found a good match (overlap > 30%), assign speaker
+        # Lower threshold to handle cases where segments don't align perfectly
+        if best_match and best_overlap > 0.3:
             if best_match not in mapping:
                 mapping[best_match] = {
                     "speaker": emilia_speaker,
@@ -407,18 +413,52 @@ def process_single_group(
         
         # Step 3: Extract Emilia segments
         emilia_segments = []
-        for manifest_path, segments in emilia_results:
-            # Try to match with our combined filename
-            manifest_dir = manifest_path.parent
-            output_name = manifest_dir.name
-            output_name_with_ext = f"{output_name}.wav"
+        if not emilia_results:
+            print(f"Warning: No Emilia results returned for group {group_key}", file=sys.stderr)
+        else:
+            # Debug: print available results
+            available_names = []
+            for manifest_path, segments in emilia_results:
+                manifest_dir = manifest_path.parent
+                output_name = manifest_dir.name
+                available_names.append(output_name)
+                # Try to match with our combined filename
+                output_name_with_ext = f"{output_name}.wav"
+                combined_stem = combined_filename.replace(".wav", "")
+                
+                # More flexible matching
+                if (output_name_with_ext == combined_filename or 
+                    output_name == combined_stem or
+                    combined_stem in output_name or
+                    output_name in combined_stem):
+                    emilia_segments = segments
+                    print(f"Matched Emilia result: {output_name} -> {combined_filename} ({len(segments)} segments)", file=sys.stderr)
+                    break
             
-            if output_name_with_ext == combined_filename or output_name == combined_filename.replace(".wav", ""):
-                emilia_segments = segments
-                break
+            if not emilia_segments:
+                print(f"Warning: Could not match Emilia results for group {group_key}", file=sys.stderr)
+                print(f"  Looking for: {combined_filename} (stem: {combined_filename.replace('.wav', '')})", file=sys.stderr)
+                print(f"  Available: {available_names[:5]}...", file=sys.stderr)
+                # Try to use the first result if only one exists
+                if len(emilia_results) == 1:
+                    _, emilia_segments = emilia_results[0]
+                    print(f"  Using the only available result ({len(emilia_segments)} segments)", file=sys.stderr)
+        
+        # Debug: check segments format and speaker information
+        if emilia_segments:
+            sample_seg = emilia_segments[0] if emilia_segments else {}
+            speakers_in_segments = [seg.get("speaker") for seg in emilia_segments[:10]]
+            print(f"Debug: Sample segment keys: {list(sample_seg.keys())}", file=sys.stderr)
+            print(f"Debug: Has speaker field: {'speaker' in sample_seg}", file=sys.stderr)
+            print(f"Debug: Sample speaker values (first 10): {speakers_in_segments}", file=sys.stderr)
+            print(f"Debug: Total segments: {len(emilia_segments)}", file=sys.stderr)
         
         # Step 4: Map results to original segments
         segment_mapping = map_emilia_segments_to_original(emilia_segments, boundaries)
+        
+        # Debug: check mapping results
+        if not segment_mapping:
+            print(f"Warning: No segments mapped for group {group_key}. Emilia segments: {len(emilia_segments)}, Original boundaries: {len(boundaries)}", file=sys.stderr)
         
         # Step 5: Create output entries
         for audio_file in audio_files:
