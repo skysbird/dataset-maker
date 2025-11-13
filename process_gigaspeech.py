@@ -232,6 +232,7 @@ def combine_audio_group(
 def map_emilia_segments_to_original(
     emilia_segments: List[Dict[str, Any]],
     original_boundaries: List[Tuple[str, float, float]],
+    group_key: str = "",
 ) -> Dict[str, Dict[str, Any]]:
     """
     Map Emilia output segments back to original GigaSpeech segments.
@@ -239,6 +240,7 @@ def map_emilia_segments_to_original(
     Args:
         emilia_segments: List of segments from Emilia output JSON
         original_boundaries: List of (segment_id, start_time, end_time) from merged audio
+        group_key: Group identifier (e.g., "143/143303") to prefix speaker IDs
     
     Returns:
         Dict mapping original segment_id to Emilia segment info
@@ -247,6 +249,9 @@ def map_emilia_segments_to_original(
     
     # Create a lookup for original boundaries
     original_lookup = {seg_id: (start, end) for seg_id, start, end in original_boundaries}
+    
+    # Normalize group_key for use as prefix (replace "/" with "_")
+    group_prefix = group_key.replace("/", "_") if group_key else ""
     
     for emilia_seg in emilia_segments:
         emilia_start = emilia_seg.get("start", 0.0)
@@ -257,6 +262,11 @@ def map_emilia_segments_to_original(
             emilia_speaker = "SPEAKER_UNKNOWN"
         else:
             emilia_speaker = str(emilia_speaker_raw)
+        
+        # Add group prefix to speaker ID to avoid conflicts across groups
+        if group_prefix and emilia_speaker != "SPEAKER_UNKNOWN":
+            emilia_speaker = f"{group_prefix}_{emilia_speaker}"
+        
         emilia_text = emilia_seg.get("text", "")
         
         # Find the original segment that best matches this Emilia segment
@@ -490,7 +500,8 @@ def process_single_group(
             print(f"Debug: Total segments: {len(emilia_segments)}", file=sys.stderr)
         
         # Step 4: Map results to original segments
-        segment_mapping = map_emilia_segments_to_original(emilia_segments, boundaries)
+        # Pass group_key to prefix speaker IDs and avoid conflicts across groups
+        segment_mapping = map_emilia_segments_to_original(emilia_segments, boundaries, group_key=group_key)
         
         # Debug: check mapping results
         if not segment_mapping:
