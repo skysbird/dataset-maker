@@ -15,8 +15,10 @@ import argparse
 import json
 import shutil
 import sys
+import threading
 import traceback
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -295,6 +297,166 @@ def map_emilia_segments_to_original(
     return mapping
 
 
+def load_processed_segments(jsonl_path: Path) -> set:
+    """
+    Load already processed segment IDs from JSONL file for resume support.
+    
+    Returns:
+        Set of segment IDs that have already been processed
+    """
+    processed = set()
+    if jsonl_path.exists():
+        try:
+            with open(jsonl_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            entry = json.loads(line)
+                            segment_id = entry.get("id")
+                            if segment_id:
+                                processed.add(segment_id)
+                        except json.JSONDecodeError:
+                            continue
+        except Exception as e:
+            print(f"Warning: Could not load processed segments from {jsonl_path}: {e}", file=sys.stderr)
+    return processed
+
+
+def process_single_group(
+    group_key: str,
+    audio_files: List[Path],
+    transcript_map: Dict[str, str],
+    gigaspeech_root: Path,
+    output_dir: Path,
+    config_path: Path,
+    silence_duration: float,
+    batch_size: int,
+    whisper_arch: str,
+    threads: int,
+    do_uvr: bool,
+    forced_language: str,
+    group_index: int,
+    total_groups: int,
+) -> List[Dict[str, Any]]:
+    """
+    Process a single audio group: combine -> Emilia -> map -> return results.
+    
+    This function is designed to be called in parallel for different groups.
+    """
+    results = []
+    
+    try:
+        # Create temporary directory for this group
+        temp_dir = output_dir / "_temp" / f"group_{group_index}"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        combined_audio_dir = temp_dir / "combined_audio"
+        combined_audio_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Step 1: Combine audio
+        audio_files = sorted(audio_files, key=lambda f: extract_segment_id_from_filename(f))
+        try:
+            combined_audio, sr, boundaries = combine_audio_group(
+                audio_files,
+                silence_duration=silence_duration,
+                target_sr=24000,  # Emilia uses 24kHz
+            )
+            
+            # Save combined audio
+            combined_filename = f"group_{group_key.replace('/', '_')}.wav"
+            combined_path = combined_audio_dir / combined_filename
+            sf.write(str(combined_path), combined_audio, sr)
+            
+        except Exception as e:
+            print(f"Error combining group {group_key}: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            return results
+        
+        # Step 2: Process with Emilia pipeline
+        try:
+            # 延迟导入：只在真正需要时才加载重型模型
+            from safe_globals import register_torch_safe_globals
+            register_torch_safe_globals()
+            from emilia_pipeline import run_emilia_pipeline
+            
+            emilia_results = run_emilia_pipeline(
+                config_path,
+                input_folder=str(combined_audio_dir),
+                batch_size=batch_size,
+                compute_type="float16",
+                whisper_arch=whisper_arch,
+                threads=threads,
+                do_uvr=do_uvr,
+                forced_language=forced_language,
+                emilia_keep_processed=False,  # Clean up intermediate files
+            )
+        except Exception as e:
+            print(f"Error running Emilia pipeline for group {group_key}: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            return results
+        
+        # Step 3: Extract Emilia segments
+        emilia_segments = []
+        for manifest_path, segments in emilia_results:
+            # Try to match with our combined filename
+            manifest_dir = manifest_path.parent
+            output_name = manifest_dir.name
+            output_name_with_ext = f"{output_name}.wav"
+            
+            if output_name_with_ext == combined_filename or output_name == combined_filename.replace(".wav", ""):
+                emilia_segments = segments
+                break
+        
+        # Step 4: Map results to original segments
+        segment_mapping = map_emilia_segments_to_original(emilia_segments, boundaries)
+        
+        # Step 5: Create output entries
+        for audio_file in audio_files:
+            segment_id = extract_segment_id_from_filename(audio_file)
+            
+            # Get transcript
+            text = transcript_map.get(segment_id, "")
+            
+            # Get speaker info from mapping
+            speaker_info = segment_mapping.get(segment_id, {})
+            speaker_id = speaker_info.get("speaker", "SPEAKER_UNKNOWN")
+            emilia_text = speaker_info.get("emilia_text", "")
+            
+            # Calculate duration
+            try:
+                info = sf.info(str(audio_file))
+                duration = info.duration
+            except Exception:
+                duration = 0.0
+            
+            # Create relative audio path
+            try:
+                audio_rel_path = str(audio_file.relative_to(gigaspeech_root))
+            except ValueError:
+                audio_rel_path = str(audio_file)
+            
+            entry = {
+                "id": segment_id,
+                "text": text,
+                "audio": audio_rel_path,
+                "speaker": speaker_id,
+                "duration": round(duration, 2),
+                "source": audio_file.name,
+                "emilia_text": emilia_text,
+            }
+            results.append(entry)
+        
+        # Clean up temporary directory for this group
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            
+    except Exception as e:
+        print(f"Error processing group {group_key}: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+    
+    return results
+
+
 def process_gigaspeech(
     gigaspeech_root: Path,
     tsv_file: Path,
@@ -308,6 +470,7 @@ def process_gigaspeech(
     threads: int = 4,
     do_uvr: bool = True,
     forced_language: str = "th",
+    max_workers: int = 2,
 ) -> None:
     """
     Main processing function for GigaSpeech 2 dataset.
@@ -339,171 +502,104 @@ def process_gigaspeech(
     output_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = output_dir / f"{split}_with_speakers.jsonl"
     
+    # Load already processed segments for resume support
+    print(f"Checking for already processed segments...")
+    processed_segments = load_processed_segments(jsonl_path)
+    print(f"Found {len(processed_segments)} already processed segments")
+    
     # Scan audio groups
     print(f"Scanning audio files in {train_dir}...")
     audio_groups = scan_audio_groups(train_dir)
     print(f"Found {len(audio_groups)} audio groups")
     
-    # Process each group
-    all_results = []
-    processed_groups = 0
+    # Filter out groups that are already fully processed
+    groups_to_process = []
+    for group_key, audio_files in audio_groups.items():
+        # Check if all segments in this group are already processed
+        segment_ids = [extract_segment_id_from_filename(f) for f in audio_files]
+        if not all(sid in processed_segments for sid in segment_ids):
+            groups_to_process.append((group_key, audio_files))
     
-    # 在项目目录中创建临时目录，而不是使用系统 /tmp
+    print(f"Groups to process: {len(groups_to_process)} (skipping {len(audio_groups) - len(groups_to_process)} already processed)")
+    
+    if not groups_to_process:
+        print("All groups already processed!")
+        return
+    
+    # Create temporary directory
     temp_dir = output_dir / "_temp"
-    temp_path = temp_dir
-    combined_audio_dir = temp_path / "combined_audio"
-    combined_audio_dir.mkdir(parents=True, exist_ok=True)
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    
+    # File lock for thread-safe writing
+    write_lock = threading.Lock()
+    
+    # Open JSONL file in append mode for thread-safe writing
+    jsonl_file = open(jsonl_path, "a", encoding="utf-8")
     
     try:
+        # Process groups concurrently
+        print(f"\nProcessing {len(groups_to_process)} groups with {max_workers} workers...")
         
-        # Step 1: Combine audio groups
-        print("\nStep 1: Combining audio groups...")
-        group_boundaries = {}
+        total_processed = 0
+        total_segments = 0
         
-        for group_key, audio_files in tqdm(audio_groups.items(), desc="Combining audio"):
-            # Sort files by segment_id (extracted from filename)
-            audio_files = sorted(audio_files, key=lambda f: extract_segment_id_from_filename(f))
-            
-            # Combine audio
-            try:
-                combined_audio, sr, boundaries = combine_audio_group(
+        # Use ThreadPoolExecutor for concurrent processing
+        # Note: Using threads instead of processes because GPU resources and model loading
+        # are better shared in threads, and we need to avoid duplicating model memory
+        from concurrent.futures import ThreadPoolExecutor
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            futures = {}
+            for idx, (group_key, audio_files) in enumerate(groups_to_process):
+                future = executor.submit(
+                    process_single_group,
+                    group_key,
                     audio_files,
-                    silence_duration=silence_duration,
-                    target_sr=24000,  # Emilia uses 24kHz
+                    transcript_map,
+                    gigaspeech_root,
+                    output_dir,
+                    config_path,
+                    silence_duration,
+                    batch_size,
+                    whisper_arch,
+                    threads,
+                    do_uvr,
+                    forced_language,
+                    idx,
+                    len(groups_to_process),
                 )
-                
-                # Save combined audio
-                combined_filename = f"group_{group_key.replace('/', '_')}.wav"
-                combined_path = combined_audio_dir / combined_filename
-                sf.write(str(combined_path), combined_audio, sr)
-                
-                # Store boundaries for later mapping
-                group_boundaries[combined_filename] = boundaries
-                
-            except Exception as e:
-                print(f"Error combining group {group_key}: {e}", file=sys.stderr)
-                continue
-        
-        print(f"Combined {len(group_boundaries)} audio groups")
-        
-        # Step 2: Process with Emilia pipeline
-        print("\nStep 2: Processing with Emilia pipeline...")
-        try:
-            emilia_results = run_emilia_pipeline(
-                config_path,
-                input_folder=str(combined_audio_dir),
-                batch_size=batch_size,
-                compute_type="float16",
-                whisper_arch=whisper_arch,
-                threads=threads,
-                do_uvr=do_uvr,
-                forced_language=forced_language,
-                emilia_keep_processed=False,  # Clean up intermediate files
-            )
-        except Exception as e:
-            print(f"Error running Emilia pipeline: {e}", file=sys.stderr)
-            raise
-        
-        # Step 3: Map results back to original segments
-        print("\nStep 3: Mapping results to original segments...")
-        
-        # Create a mapping from combined filename to Emilia results
-        emilia_by_file = {}
-        for manifest_path, segments in emilia_results:
-            # Extract the original combined filename from the manifest path
-            # Format: {combined_audio_dir}_processed/{output_name}/{output_name}.json
-            # output_name is the stem of the original audio file
-            manifest_dir = manifest_path.parent
-            output_name = manifest_dir.name  # This is the stem of the original audio file
+                futures[future] = (group_key, idx)
             
-            # Our combined filenames are like: group_10_10000.wav
-            # So output_name should be: group_10_10000
-            # Try to match with our combined filenames
-            combined_filename = None
-            output_name_with_ext = f"{output_name}.wav"
-            
-            # First try exact match
-            if output_name_with_ext in group_boundaries:
-                combined_filename = output_name_with_ext
-            else:
-                # Try stem match
-                for key in group_boundaries.keys():
-                    key_stem = key.replace(".wav", "")
-                    if key_stem == output_name or key == output_name_with_ext:
-                        combined_filename = key
-                        break
-            
-            if combined_filename:
-                emilia_by_file[combined_filename] = segments
-            else:
-                print(f"Warning: Could not match Emilia result '{output_name}' to any combined file. Available: {list(group_boundaries.keys())[:5]}...", file=sys.stderr)
-        
-        # Map each original segment
-        for group_key, audio_files in tqdm(audio_groups.items(), desc="Mapping segments"):
-            combined_filename = f"group_{group_key.replace('/', '_')}.wav"
-            
-            if combined_filename not in group_boundaries:
-                print(f"Warning: No boundaries found for {combined_filename}, skipping group", file=sys.stderr)
-                continue
-            
-            boundaries = group_boundaries[combined_filename]
-            emilia_segments = emilia_by_file.get(combined_filename, [])
-            
-            if not emilia_segments:
-                print(f"Warning: No Emilia results for {combined_filename}, using UNKNOWN_SPEAKER", file=sys.stderr)
-            
-            # Map Emilia segments to original
-            segment_mapping = map_emilia_segments_to_original(emilia_segments, boundaries)
-            
-            # Create output entries for each original segment
-            for audio_file in audio_files:
-                segment_id = extract_segment_id_from_filename(audio_file)
-                
-                # Get transcript
-                text = transcript_map.get(segment_id, "")
-                
-                # Get speaker info from mapping
-                speaker_info = segment_mapping.get(segment_id, {})
-                speaker_id = speaker_info.get("speaker", "SPEAKER_UNKNOWN")
-                emilia_text = speaker_info.get("emilia_text", "")
-                
-                # Calculate duration
+            # Process completed tasks and write results
+            for future in as_completed(futures):
+                group_key, idx = futures[future]
                 try:
-                    info = sf.info(str(audio_file))
-                    duration = info.duration
-                except Exception:
-                    duration = 0.0
-                
-                # Create relative audio path (relative to gigaspeech_root)
-                try:
-                    audio_rel_path = str(audio_file.relative_to(gigaspeech_root))
-                except ValueError:
-                    # If not relative, use absolute path
-                    audio_rel_path = str(audio_file)
-                
-                entry = {
-                    "id": segment_id,
-                    "text": text,
-                    "audio": audio_rel_path,
-                    "speaker": speaker_id,
-                    "duration": round(duration, 2),
-                    "source": audio_file.name,
-                    "emilia_text": emilia_text,
-                }
-                all_results.append(entry)
-        
-        # Step 4: Write JSONL output
-        print(f"\nStep 4: Writing output to {jsonl_path}...")
-        with open(jsonl_path, "w", encoding="utf-8") as f:
-            for entry in all_results:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    results = future.result()
+                    if results:
+                        # Thread-safe writing
+                        with write_lock:
+                            for entry in results:
+                                jsonl_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                                jsonl_file.flush()  # Ensure data is written immediately
+                        total_processed += 1
+                        total_segments += len(results)
+                        print(f"✓ Processed group {idx+1}/{len(groups_to_process)}: {group_key} ({len(results)} segments)", file=sys.stderr)
+                    else:
+                        print(f"✗ Group {idx+1}/{len(groups_to_process)}: {group_key} produced no results", file=sys.stderr)
+                except Exception as e:
+                    print(f"✗ Error processing group {group_key}: {e}", file=sys.stderr)
+                    traceback.print_exc(file=sys.stderr)
         
         print(f"\nProcessing complete!")
-        print(f"  Processed groups: {len(group_boundaries)}")
-        print(f"  Total segments: {len(all_results)}")
+        print(f"  Processed groups: {total_processed}/{len(groups_to_process)}")
+        print(f"  Total segments: {total_segments}")
         print(f"  Output: {jsonl_path}")
     
     finally:
+        # Close JSONL file
+        jsonl_file.close()
+        
         # 清理临时目录
         if temp_dir.exists():
             print(f"\nCleaning up temporary directory: {temp_dir}", file=sys.stderr)
@@ -586,6 +682,13 @@ def main():
         default="th",
         help="Language code for transcription (default: th)",
     )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=2,
+        help="Maximum number of concurrent workers for processing groups (default: 2). "
+             "Note: Higher values may cause GPU memory issues.",
+    )
     
     args = parser.parse_args()
     
@@ -612,6 +715,7 @@ def main():
         threads=args.threads,
         do_uvr=not args.no_uvr,
         forced_language=args.language,
+        max_workers=args.max_workers,
     )
 
 
