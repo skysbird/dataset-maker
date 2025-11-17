@@ -88,10 +88,23 @@ except Exception as e:
     traceback.print_exc(file=sys.stderr)
     raise
 
-print("  [5/5] 所有导入完成", file=sys.stderr)
+try:
+    print("  [5/6] 导入 infer_uvr...", file=sys.stderr)
+    from infer_uvr import UVRSeparator
+    print("    ✓ infer_uvr 导入成功", file=sys.stderr)
+except Exception as e:
+    print(f"    ✗ infer_uvr 导入失败: {e}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+    raise
+
+print("  [6/6] 所有导入完成", file=sys.stderr)
 
 # 全局锁，用于保护模型加载过程，避免并发加载冲突
 _model_load_lock = threading.Lock()
+
+# 全局 UVR separator 缓存（每个 worker 一个实例）
+_uvr_separator_cache = {}
+_uvr_separator_lock = threading.Lock()
 
 
 def load_tsv(tsv_path: Path) -> Dict[str, str]:
@@ -355,6 +368,143 @@ def map_emilia_segments_to_original(
     return mapping
 
 
+def resolve_config_path(config_path: Path, candidate: str) -> Path:
+    """
+    Resolve a path relative to the configuration file location.
+    Similar to emilia_pipeline._resolve_path
+    """
+    path = Path(candidate)
+    if path.is_absolute():
+        return path
+    
+    relative_to_config = config_path.parent / path
+    if relative_to_config.exists():
+        return relative_to_config.resolve()
+    
+    relative_to_cwd = Path.cwd() / path
+    if relative_to_cwd.exists():
+        return relative_to_cwd.resolve()
+    
+    # Fall back to the config-relative location even if it does not yet exist
+    return relative_to_config.resolve(strict=False)
+
+
+def get_uvr_separator(config_path: Path, worker_id: int = 0) -> Optional[UVRSeparator]:
+    """
+    Get or create UVR separator for a worker.
+    Uses thread-local caching to avoid reloading models.
+    
+    Args:
+        config_path: Path to Emilia config.json
+        worker_id: Worker ID for caching (default: 0)
+    
+    Returns:
+        UVRSeparator instance or None if UVR is disabled
+    """
+    cache_key = (str(config_path.resolve()), worker_id)
+    
+    with _uvr_separator_lock:
+        if cache_key in _uvr_separator_cache:
+            return _uvr_separator_cache[cache_key]
+    
+    # Load config
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception as e:
+        print(f"Error loading config for UVR: {e}", file=sys.stderr)
+        return None
+    
+    # Get UVR model path
+    uvr_model_path_str = cfg["separate"]["step1"].get("model_path")
+    if not uvr_model_path_str:
+        print("Warning: No UVR model path in config, skipping UVR processing", file=sys.stderr)
+        return None
+    
+    uvr_model_path = resolve_config_path(config_path, uvr_model_path_str)
+    
+    if not uvr_model_path.exists():
+        print(f"Warning: UVR model not found at {uvr_model_path}, skipping UVR processing", file=sys.stderr)
+        return None
+    
+    # Create separator
+    try:
+        separator = UVRSeparator(
+            uvr_model_path,
+            metadata_json=cfg["separate"]["step1"].get("metadata_json"),
+        )
+        
+        with _uvr_separator_lock:
+            _uvr_separator_cache[cache_key] = separator
+        
+        return separator
+    except Exception as e:
+        print(f"Error creating UVR separator: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return None
+
+
+def process_audio_with_uvr(
+    audio_path: Path,
+    separator: UVRSeparator,
+    backup: bool = False,
+) -> bool:
+    """
+    Process a single audio file with UVR and save in-place (vocals only).
+    
+    Args:
+        audio_path: Path to the audio file
+        separator: UVRSeparator instance
+        backup: If True, create backup before overwriting
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Load original audio
+        waveform, sample_rate = librosa.load(str(audio_path), sr=None, mono=False)
+        
+        # Convert to stereo if needed
+        if waveform.ndim == 1:
+            waveform = np.stack([waveform, waveform])
+        if waveform.shape[0] > 2:
+            waveform = waveform[:2]
+        
+        # Run UVR separation
+        background, vocals = separator.predict(waveform, sample_rate)
+        
+        # Use vocals only (convert to mono)
+        if vocals.ndim == 1:
+            vocal_mono = vocals
+        elif vocals.ndim == 2:
+            # Take mean across channels
+            channel_axis = 0 if vocals.shape[0] < vocals.shape[1] else 1
+            vocal_mono = np.mean(vocals, axis=channel_axis, keepdims=False)
+        else:
+            vocal_mono = np.mean(vocals, axis=tuple(range(vocals.ndim - 1)))
+        
+        # Ensure sample rate matches original (preserve original sample rate)
+        if sample_rate != 24000:
+            # Keep original sample rate, don't resample
+            pass
+        
+        # Backup original file if requested
+        if backup:
+            backup_path = audio_path.with_suffix('.wav.backup')
+            if not backup_path.exists():
+                shutil.copy2(audio_path, backup_path)
+        
+        # Save processed audio (overwrite original)
+        sf.write(str(audio_path), vocal_mono, sample_rate)
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error processing {audio_path} with UVR: {e}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
+        return False
+
+
 def load_processed_segments(jsonl_path: Path) -> set:
     """
     Load already processed segment IDs from JSONL file for resume support.
@@ -397,6 +547,8 @@ def process_single_group(
     group_index: int,
     total_groups: int,
     worker_id: int = 0,
+    process_original_audio: bool = True,
+    backup_original: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Process a single audio group: combine -> Emilia -> map -> return results.
@@ -564,7 +716,28 @@ def process_single_group(
             for seg_id, info in list(segment_mapping.items())[:3]:
                 print(f"  {seg_id}: speaker={info.get('speaker')}, overlap={info.get('overlap_ratio', 0):.2f}", file=sys.stderr)
         
-        # Step 5: Create output entries
+        # Step 5: Process original audio files with UVR (vocals only)
+        if process_original_audio:
+            print(f"Processing {len(audio_files)} original audio files with UVR (vocals only)...", file=sys.stderr)
+            uvr_separator = get_uvr_separator(config_path, worker_id=worker_id)
+            
+            if uvr_separator:
+                uvr_success_count = 0
+                uvr_fail_count = 0
+                
+                for audio_file in audio_files:
+                    if process_audio_with_uvr(audio_file, uvr_separator, backup=backup_original):
+                        uvr_success_count += 1
+                        print(f"  ✓ Processed with UVR: {audio_file.name}", file=sys.stderr)
+                    else:
+                        uvr_fail_count += 1
+                        print(f"  ✗ Failed to process with UVR: {audio_file.name}", file=sys.stderr)
+                
+                print(f"UVR processing complete: {uvr_success_count} succeeded, {uvr_fail_count} failed", file=sys.stderr)
+            else:
+                print(f"Warning: UVR separator not available, skipping original audio processing", file=sys.stderr)
+        
+        # Step 6: Create output entries
         for audio_file in audio_files:
             segment_id = extract_segment_id_from_filename(audio_file)
             
@@ -630,6 +803,8 @@ def process_gigaspeech(
     do_uvr: bool = True,
     forced_language: str = "th",
     max_workers: int = 1,
+    process_original_audio: bool = True,
+    backup_original: bool = False,
 ) -> None:
     """
     Main processing function for GigaSpeech 2 dataset.
@@ -730,6 +905,8 @@ def process_gigaspeech(
                         idx,
                         len(groups_to_process),
                         worker_id=0,  # 单线程时 worker_id 始终为 0
+                        process_original_audio=process_original_audio,
+                        backup_original=backup_original,
                     )
                     
                     if results:
@@ -786,6 +963,8 @@ def process_gigaspeech(
                         idx,
                         len(groups_to_process),
                         worker_id,  # 传递 worker_id
+                        process_original_audio,
+                        backup_original,
                     )
                     futures[future] = (group_key, idx)
                 
@@ -907,6 +1086,16 @@ def main():
         help="Maximum number of concurrent workers for processing groups (default: 1). "
              "Note: Set to 1 to avoid model loading conflicts. Higher values may cause GPU memory issues.",
     )
+    parser.add_argument(
+        "--no-process-original",
+        action="store_true",
+        help="Disable UVR processing of original GigaSpeech audio files (default: process original files)",
+    )
+    parser.add_argument(
+        "--backup-original",
+        action="store_true",
+        help="Create backup of original audio files before UVR processing (saved as .wav.backup)",
+    )
     
     args = parser.parse_args()
     
@@ -934,6 +1123,8 @@ def main():
         do_uvr=not args.no_uvr,
         forced_language=args.language,
         max_workers=args.max_workers,
+        process_original_audio=not args.no_process_original,
+        backup_original=args.backup_original,
     )
 
 
