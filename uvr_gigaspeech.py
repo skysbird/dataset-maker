@@ -2,15 +2,15 @@
 """
 Apply UVR (Ultimate Vocal Remover) to GigaSpeech wav files in-place.
 
-This script processes all wav files in the GigaSpeech directory structure,
+This script processes wav files listed in the JSONL output from process_gigaspeech.py,
 applies UVR to remove background music, and saves the processed audio
 back to the original location (overwriting or saving alongside).
 
 Usage:
     python uvr_gigaspeech.py \
         --gigaspeech-root g2_th_refined/data/th \
+        --jsonl output/gigaspeech_processed/train_with_speakers.jsonl \
         --config Emilia/config.json \
-        --split train \
         --backup  # Optional: backup original files
 """
 
@@ -19,7 +19,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Set
 
 import librosa
 import numpy as np
@@ -33,35 +33,59 @@ except ImportError:
     sys.exit(1)
 
 
-def find_all_wav_files(root_dir: Path, split: str = "train") -> List[Path]:
+def load_audio_files_from_jsonl(
+    jsonl_path: Path,
+    gigaspeech_root: Path,
+) -> List[Path]:
     """
-    Recursively find all .wav files in GigaSpeech directory structure.
+    Load audio file paths from JSONL file.
     
     Args:
-        root_dir: Root directory (e.g., g2_th_refined/data/th)
-        split: Dataset split (train, dev, test)
+        jsonl_path: Path to JSONL file (e.g., train_with_speakers.jsonl)
+        gigaspeech_root: Root directory of GigaSpeech data
     
     Returns:
-        List of all .wav file paths
+        List of audio file paths (absolute paths)
     """
-    wav_files = []
-    split_dir = root_dir / split
+    audio_files = []
+    seen_paths: Set[str] = set()
     
-    if not split_dir.exists():
-        print(f"Error: Directory not found: {split_dir}", file=sys.stderr)
-        return wav_files
+    if not jsonl_path.exists():
+        print(f"Error: JSONL file not found: {jsonl_path}", file=sys.stderr)
+        return audio_files
     
-    # Walk through directory structure: train/10/10000/*.wav
-    for subdir1 in split_dir.iterdir():
-        if not subdir1.is_dir():
-            continue
-        for subdir2 in subdir1.iterdir():
-            if not subdir2.is_dir():
+    print(f"Loading audio files from {jsonl_path}...")
+    with open(jsonl_path, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
                 continue
-            # Collect all .wav files in this directory
-            wav_files.extend(sorted(subdir2.glob("*.wav")))
+            
+            try:
+                entry = json.loads(line)
+                audio_rel_path = entry.get("audio")
+                if not audio_rel_path:
+                    continue
+                
+                # Build absolute path
+                audio_path = gigaspeech_root / audio_rel_path
+                
+                # Deduplicate (same file might appear multiple times)
+                audio_path_str = str(audio_path.resolve())
+                if audio_path_str in seen_paths:
+                    continue
+                seen_paths.add(audio_path_str)
+                
+                if audio_path.exists():
+                    audio_files.append(audio_path)
+                else:
+                    print(f"Warning: Audio file not found: {audio_path} (line {line_num})", file=sys.stderr)
+                    
+            except json.JSONDecodeError as e:
+                print(f"Warning: Invalid JSON at line {line_num}: {e}", file=sys.stderr)
+                continue
     
-    return wav_files
+    return sorted(audio_files)
 
 
 def process_audio_file(
@@ -126,7 +150,7 @@ def process_audio_file(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Apply UVR to GigaSpeech wav files in-place"
+        description="Apply UVR to GigaSpeech wav files listed in JSONL file"
     )
     parser.add_argument(
         "--gigaspeech-root",
@@ -135,17 +159,16 @@ def main():
         help="Root directory of GigaSpeech data (e.g., g2_th_refined/data/th)",
     )
     parser.add_argument(
+        "--jsonl",
+        type=Path,
+        required=True,
+        help="Path to JSONL file with audio paths (e.g., output/gigaspeech_processed/train_with_speakers.jsonl)",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=Path("Emilia/config.json"),
         help="Path to Emilia config.json (default: Emilia/config.json)",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="train",
-        choices=["train", "dev", "test"],
-        help="Dataset split to process (default: train)",
     )
     parser.add_argument(
         "--backup",
@@ -164,6 +187,9 @@ def main():
     # Validate inputs
     if not args.gigaspeech_root.exists():
         parser.error(f"GigaSpeech root directory not found: {args.gigaspeech_root}")
+    
+    if not args.jsonl.exists():
+        parser.error(f"JSONL file not found: {args.jsonl}")
     
     if not args.config.exists():
         parser.error(f"Config file not found: {args.config}")
@@ -209,19 +235,18 @@ def main():
     except Exception as e:
         parser.error(f"Failed to initialize UVR separator: {e}")
     
-    # Find all wav files
-    print(f"Scanning for wav files in {args.gigaspeech_root / args.split}...")
-    wav_files = find_all_wav_files(args.gigaspeech_root, args.split)
+    # Load audio files from JSONL
+    wav_files = load_audio_files_from_jsonl(args.jsonl, args.gigaspeech_root)
     
     if not wav_files:
-        print("No wav files found!")
+        print("No audio files found in JSONL!")
         return
     
     if args.max_files:
         wav_files = wav_files[:args.max_files]
         print(f"Limiting to {args.max_files} files for testing")
     
-    print(f"Found {len(wav_files)} wav files to process")
+    print(f"Found {len(wav_files)} unique audio files to process")
     
     if args.backup:
         print("Backup mode enabled: original files will be saved as .wav.backup")
