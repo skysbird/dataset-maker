@@ -175,13 +175,28 @@ def main():
     except Exception as e:
         parser.error(f"Failed to load config file: {e}")
     
-    # Get UVR model path
-    uvr_model_path = cfg["separate"]["step1"]["model_path"]
-    if not Path(uvr_model_path).is_absolute():
-        uvr_model_path = args.config.parent / uvr_model_path
+    # Get UVR model path (using same resolution logic as emilia_pipeline.py)
+    uvr_model_path_str = cfg["separate"]["step1"]["model_path"]
+    uvr_model_path = Path(uvr_model_path_str)
     
-    if not Path(uvr_model_path).exists():
-        parser.error(f"UVR model not found: {uvr_model_path}")
+    if not uvr_model_path.is_absolute():
+        # Try relative to config file first
+        relative_to_config = args.config.parent / uvr_model_path
+        if relative_to_config.exists():
+            uvr_model_path = relative_to_config.resolve()
+        else:
+            # Try relative to current working directory
+            relative_to_cwd = Path.cwd() / uvr_model_path
+            if relative_to_cwd.exists():
+                uvr_model_path = relative_to_cwd.resolve()
+            else:
+                # Fall back to config-relative (may not exist yet)
+                uvr_model_path = relative_to_config.resolve(strict=False)
+    
+    if not uvr_model_path.exists():
+        parser.error(f"UVR model not found: {uvr_model_path}\n"
+                     f"  Tried: {args.config.parent / uvr_model_path_str}\n"
+                     f"  Tried: {Path.cwd() / uvr_model_path_str}")
     
     # Initialize UVR separator
     print(f"Initializing UVR separator with model: {uvr_model_path}")
