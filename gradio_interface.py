@@ -429,13 +429,19 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         Inserts 10 seconds of silence between files.
         The output files are saved in the same folder with names 'combined.wav' (if one batch)
         or 'combined_1.wav', 'combined_2.wav', etc.
+        
+        Note: This function continues processing even if webui connection is lost.
+        All progress is logged to console (stderr).
         """
         import sys
         
         if not project:
             msg = "No project selected."
             print(msg, file=sys.stderr)
-            yield msg
+            try:
+                yield msg
+            except:
+                pass
             return
         project_base = DATASETS_FOLDER / project
         wavs_folder = project_base / "wavs"
@@ -444,7 +450,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         if not wavs_folder.exists():
             msg = "Wavs folder not found in project."
             print(msg, file=sys.stderr)
-            yield msg
+            try:
+                yield msg
+            except:
+                pass
             return
         audio_files = [
             f
@@ -454,7 +463,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         if not audio_files:
             msg = "No audio files found in the project's wavs folder."
             print(msg, file=sys.stderr)
-            yield msg
+            try:
+                yield msg
+            except:
+                pass
             return
 
         print(f"[Console] Found {len(audio_files)} audio files to combine", file=sys.stderr)
@@ -466,7 +478,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         except ImportError:
             msg = "pydub module is not installed. Please install it via pip install pydub"
             print(msg, file=sys.stderr)
-            yield msg
+            try:
+                yield msg
+            except:
+                pass
             return
         max_duration_ms = 2 * 60 * 60 * 1000
         silence = AudioSegment.silent(duration=10000)
@@ -483,7 +498,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         except Exception as e:
             error_msg = f"Error calculating durations: {str(e)}"
             print(f"[Console] ERROR: {error_msg}", file=sys.stderr)
-            yield error_msg
+            try:
+                yield error_msg
+            except:
+                pass
             return
         
         total_duration_ms = sum(durations)
@@ -507,7 +525,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
                 current_duration += file_duration
             if i % 100 == 0:
                 print(f"[Console]   Processed {i}/{len(audio_files)} files...", file=sys.stderr)
-                yield f"Building batches: {i}/{len(audio_files)} files processed..."
+                try:
+                    yield f"Building batches: {i}/{len(audio_files)} files processed..."
+                except:
+                    pass  # Continue processing even if webui disconnected
         if current_batch:
             batches.append(current_batch)
             print(f"[Console]   Batch {len(batches)}: {len(current_batch)} files, {current_duration/1000:.0f}s", file=sys.stderr)
@@ -538,7 +559,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
                     messages.append(msg)
                     print(f"[Console]   ⊘ {msg}", file=sys.stderr)
                     skipped_count += 1
-                    yield f"Skipping batch {idx}/{total_batches} (already exists)...\n" + '\n'.join(messages)
+                    try:
+                        yield f"Skipping batch {idx}/{total_batches} (already exists)...\n" + '\n'.join(messages)
+                    except:
+                        pass  # Continue processing even if webui disconnected
                     continue
                 except Exception as e:
                     # File exists but may be corrupted, re-process it
@@ -546,7 +570,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
                     output_path.unlink()  # Remove corrupted file
             
             print(f"[Console]   Processing batch {idx}/{total_batches} ({len(batch)} files)...", file=sys.stderr)
-            yield f"Processing batch {idx}/{total_batches} ({len(batch)} files)..."
+            try:
+                yield f"Processing batch {idx}/{total_batches} ({len(batch)} files)..."
+            except:
+                pass  # Continue processing even if webui disconnected
             
             # Read first file to get sample rate and build silence buffer
             first_data, sr = sf.read(str(batch[0]), dtype='float32')
@@ -561,15 +588,24 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
                 parts.append(data)
                 parts.append(silence)
                 if file_idx % 50 == 0:
-                    yield f"Batch {idx}/{total_batches}: Reading file {file_idx}/{len(batch)}..."
+                    try:
+                        yield f"Batch {idx}/{total_batches}: Reading file {file_idx}/{len(batch)}..."
+                    except:
+                        pass  # Continue processing even if webui disconnected
             if parts:
                 parts = parts[:-1]
             print(f"[Console]     Concatenating {len(parts)} segments...", file=sys.stderr)
-            yield f"Batch {idx}/{total_batches}: Concatenating audio..."
+            try:
+                yield f"Batch {idx}/{total_batches}: Concatenating audio..."
+            except:
+                pass  # Continue processing even if webui disconnected
             combined = np.concatenate(parts)
             # Write combined audio
             print(f"[Console]     Writing {out_name}...", file=sys.stderr)
-            yield f"Batch {idx}/{total_batches}: Writing {out_name}..."
+            try:
+                yield f"Batch {idx}/{total_batches}: Writing {out_name}..."
+            except:
+                pass  # Continue processing even if webui disconnected
             sf.write(str(output_path), combined, sr)
             # Report progress
             duration_sec = combined.shape[0] // sr
@@ -577,7 +613,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
             msg = f'Batch {idx}/{total_batches}: saved as {out_name} ({duration_sec} seconds, {file_size_mb:.1f} MB).'
             messages.append(msg)
             print(f"[Console]   ✓ {msg}", file=sys.stderr)
-            yield '\n'.join(messages)
+            try:
+                yield '\n'.join(messages)
+            except:
+                pass  # Continue processing even if webui disconnected
         
         if skipped_count > 0:
             print(f"[Console] Skipped {skipped_count} already-completed batch(es)", file=sys.stderr)
@@ -604,7 +643,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
                     moved_count += 1
             if i % 100 == 0:
                 print(f"[Console]   Processed {i}/{len(audio_files)} files (moved: {moved_count}, already moved: {skipped_move_count})...", file=sys.stderr)
-                yield f"Moving files: {i}/{len(audio_files)} (moved: {moved_count}, skipped: {skipped_move_count})..."
+                try:
+                    yield f"Moving files: {i}/{len(audio_files)} (moved: {moved_count}, skipped: {skipped_move_count})..."
+                except:
+                    pass  # Continue processing even if webui disconnected
         
         if skipped_move_count > 0:
             print(f"[Console] Skipped moving {skipped_move_count} already-moved files", file=sys.stderr)
@@ -612,7 +654,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         processed_count = total_batches - skipped_count
         final_msg = f"Combination complete! Processed {processed_count} batch(es), skipped {skipped_count} already-completed batch(es)."
         print(f"[Console] ✓ {final_msg}", file=sys.stderr)
-        yield '\n'.join(messages + [final_msg])
+        try:
+            yield '\n'.join(messages + [final_msg])
+        except:
+            pass  # Final message, webui may have disconnected but processing is complete
 
 def get_resume_status(project: str):
     """
