@@ -520,7 +520,31 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         import soundfile as sf
         import numpy as np
         messages = []
+        skipped_count = 0
+        
         for idx, batch in enumerate(batches, start=1):
+            # Determine output filename
+            out_name = 'combined.wav' if len(batches) == 1 else f'combined_{idx}.wav'
+            output_path = wavs_folder / out_name
+            
+            # Check if file already exists (resume support)
+            if output_path.exists():
+                file_size_mb = output_path.stat().st_size / (1024 * 1024)
+                try:
+                    # Verify file is valid by reading its duration
+                    info = sf.info(str(output_path))
+                    duration_sec = info.duration
+                    msg = f'Batch {idx}/{total_batches}: skipped (already exists: {out_name}, {duration_sec:.0f}s, {file_size_mb:.1f} MB).'
+                    messages.append(msg)
+                    print(f"[Console]   ⊘ {msg}", file=sys.stderr)
+                    skipped_count += 1
+                    yield f"Skipping batch {idx}/{total_batches} (already exists)...\n" + '\n'.join(messages)
+                    continue
+                except Exception as e:
+                    # File exists but may be corrupted, re-process it
+                    print(f"[Console]   Warning: {out_name} exists but may be corrupted, re-processing...", file=sys.stderr)
+                    output_path.unlink()  # Remove corrupted file
+            
             print(f"[Console]   Processing batch {idx}/{total_batches} ({len(batch)} files)...", file=sys.stderr)
             yield f"Processing batch {idx}/{total_batches} ({len(batch)} files)..."
             
@@ -543,9 +567,6 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
             print(f"[Console]     Concatenating {len(parts)} segments...", file=sys.stderr)
             yield f"Batch {idx}/{total_batches}: Concatenating audio..."
             combined = np.concatenate(parts)
-            # Determine output filename
-            out_name = 'combined.wav' if len(batches) == 1 else f'combined_{idx}.wav'
-            output_path = wavs_folder / out_name
             # Write combined audio
             print(f"[Console]     Writing {out_name}...", file=sys.stderr)
             yield f"Batch {idx}/{total_batches}: Writing {out_name}..."
@@ -558,18 +579,38 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
             print(f"[Console]   ✓ {msg}", file=sys.stderr)
             yield '\n'.join(messages)
         
-        # Move original wav files to uncombined folder
+        if skipped_count > 0:
+            print(f"[Console] Skipped {skipped_count} already-completed batch(es)", file=sys.stderr)
+        
+        # Move original wav files to uncombined folder (only if not already moved)
         print(f"[Console] Step 4/4: Moving {len(audio_files)} original files to uncombined_wavs folder...", file=sys.stderr)
         progress_callback(0.75, 'Finishing up and moving original wav files.')
         import shutil
+        moved_count = 0
+        skipped_move_count = 0
         for i, f in enumerate(audio_files, 1):
-            shutil.copy(str(f), str(uncombined_folder / f.name))
-            f.unlink()
+            # Check if file already exists in uncombined folder (resume support)
+            dest_path = uncombined_folder / f.name
+            if dest_path.exists():
+                # File already moved, just remove from wavs folder if it still exists
+                if f.exists():
+                    f.unlink()
+                skipped_move_count += 1
+            else:
+                # File not moved yet, move it
+                if f.exists():
+                    shutil.copy(str(f), str(dest_path))
+                    f.unlink()
+                    moved_count += 1
             if i % 100 == 0:
-                print(f"[Console]   Moved {i}/{len(audio_files)} files...", file=sys.stderr)
-                yield f"Moving files: {i}/{len(audio_files)}..."
+                print(f"[Console]   Processed {i}/{len(audio_files)} files (moved: {moved_count}, already moved: {skipped_move_count})...", file=sys.stderr)
+                yield f"Moving files: {i}/{len(audio_files)} (moved: {moved_count}, skipped: {skipped_move_count})..."
         
-        final_msg = f"Combination complete! Created {total_batches} file(s)."
+        if skipped_move_count > 0:
+            print(f"[Console] Skipped moving {skipped_move_count} already-moved files", file=sys.stderr)
+        
+        processed_count = total_batches - skipped_count
+        final_msg = f"Combination complete! Processed {processed_count} batch(es), skipped {skipped_count} already-completed batch(es)."
         print(f"[Console] ✓ {final_msg}", file=sys.stderr)
         yield '\n'.join(messages + [final_msg])
 
