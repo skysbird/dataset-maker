@@ -1435,8 +1435,35 @@ def setup_gradio():
     return demo
 
 def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Launch Gradio interface for transcription and correction")
+    parser.add_argument(
+        "--server-name",
+        type=str,
+        default=None,
+        help="Server name (IP address) to bind to. Use '0.0.0.0' to make the server accessible from all network interfaces. Default: None (localhost only)",
+    )
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=None,
+        help="Server port to bind to. Default: None (Gradio will use a random available port)",
+    )
+    parser.add_argument(
+        "--share",
+        action="store_true",
+        help="Create a public link for the interface (via Gradio's sharing service)",
+    )
+    
+    args = parser.parse_args()
+    
     demo = setup_gradio()
-    demo.launch()
+    demo.launch(
+        server_name=args.server_name,
+        server_port=args.server_port,
+        share=args.share,
+    )
 
 if __name__ == "__main__":
     import os
