@@ -435,229 +435,288 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         """
         import sys
         
-        if not project:
-            msg = "No project selected."
-            print(msg, file=sys.stderr)
-            try:
-                yield msg
-            except:
-                pass
-            return
-        project_base = DATASETS_FOLDER / project
-        wavs_folder = project_base / "wavs"
-        uncombined_folder = project_base / "uncombined_wavs"
-        uncombined_folder.mkdir(parents=True, exist_ok=True)
-        if not wavs_folder.exists():
-            msg = "Wavs folder not found in project."
-            print(msg, file=sys.stderr)
-            try:
-                yield msg
-            except:
-                pass
-            return
-        audio_files = [
-            f
-            for ext in VALID_AUDIO_EXTENSIONS
-            for f in wavs_folder.glob(f"*{ext}")
-        ]
-        if not audio_files:
-            msg = "No audio files found in the project's wavs folder."
-            print(msg, file=sys.stderr)
-            try:
-                yield msg
-            except:
-                pass
-            return
-
-        print(f"[Console] Found {len(audio_files)} audio files to combine", file=sys.stderr)
-        print(f"[Console] Starting combination process...", file=sys.stderr)
-
-        try:
-            from pydub import AudioSegment
-            from pydub.utils import mediainfo
-        except ImportError:
-            msg = "pydub module is not installed. Please install it via pip install pydub"
-            print(msg, file=sys.stderr)
-            try:
-                yield msg
-            except:
-                pass
-            return
-        max_duration_ms = 2 * 60 * 60 * 1000
-        silence = AudioSegment.silent(duration=10000)
-        batches = []
-        current_batch = []
-        current_duration = 0
-
-        # Retrieve durations in parallel using multiprocessing
-        print(f"[Console] Step 1/4: Calculating durations for {len(audio_files)} files...", file=sys.stderr)
-        progress_callback(0, "Calculating durations...")
-        try:
-            with multiprocessing.Pool() as pool:
-                durations = pool.map(_get_duration, audio_files)
-        except Exception as e:
-            error_msg = f"Error calculating durations: {str(e)}"
-            print(f"[Console] ERROR: {error_msg}", file=sys.stderr)
-            try:
-                yield error_msg
-            except:
-                pass
-            return
+        # Flag to track if webui connection is lost
+        webui_connected = True
         
-        total_duration_ms = sum(durations)
-        total_duration_hours = total_duration_ms / 3600000
-        print(f"[Console] Total duration: {total_duration_hours:.2f} hours ({total_duration_ms/1000:.0f} seconds)", file=sys.stderr)
+        try:
+            if not project:
+                msg = "No project selected."
+                print(msg, file=sys.stderr)
+                try:
+                    yield msg
+                except GeneratorExit:
+                    raise  # Allow generator to close
+                except:
+                    pass
+                return
+            project_base = DATASETS_FOLDER / project
+            wavs_folder = project_base / "wavs"
+            uncombined_folder = project_base / "uncombined_wavs"
+            uncombined_folder.mkdir(parents=True, exist_ok=True)
+            if not wavs_folder.exists():
+                msg = "Wavs folder not found in project."
+                print(msg, file=sys.stderr)
+                try:
+                    yield msg
+                except GeneratorExit:
+                    raise
+                except:
+                    pass
+                return
+            audio_files = [
+                f
+                for ext in VALID_AUDIO_EXTENSIONS
+                for f in wavs_folder.glob(f"*{ext}")
+            ]
+            if not audio_files:
+                msg = "No audio files found in the project's wavs folder."
+                print(msg, file=sys.stderr)
+                try:
+                    yield msg
+                except GeneratorExit:
+                    raise
+                except:
+                    pass
+                return
 
-        # Build batches using retrieved durations
-        print(f"[Console] Step 2/4: Building batches (max {max_duration_ms/3600000:.1f} hours per batch)...", file=sys.stderr)
-        progress_callback(0.25, "Building batches...")
-        for i, (audio_file, file_duration) in enumerate(zip(audio_files, durations), 1):
-            additional_duration = file_duration + (10000 if current_batch else 0)
-            if current_duration + additional_duration > max_duration_ms and current_batch:
+            print(f"[Console] Found {len(audio_files)} audio files to combine", file=sys.stderr)
+            print(f"[Console] Starting combination process...", file=sys.stderr)
+
+            try:
+                from pydub import AudioSegment
+                from pydub.utils import mediainfo
+            except ImportError:
+                msg = "pydub module is not installed. Please install it via pip install pydub"
+                print(msg, file=sys.stderr)
+                try:
+                    yield msg
+                except GeneratorExit:
+                    raise
+                except:
+                    pass
+                return
+            max_duration_ms = 2 * 60 * 60 * 1000
+            silence = AudioSegment.silent(duration=10000)
+            batches = []
+            current_batch = []
+            current_duration = 0
+
+            # Retrieve durations in parallel using multiprocessing
+            print(f"[Console] Step 1/4: Calculating durations for {len(audio_files)} files...", file=sys.stderr)
+            progress_callback(0, "Calculating durations...")
+            try:
+                with multiprocessing.Pool() as pool:
+                    durations = pool.map(_get_duration, audio_files)
+            except Exception as e:
+                error_msg = f"Error calculating durations: {str(e)}"
+                print(f"[Console] ERROR: {error_msg}", file=sys.stderr)
+                try:
+                    yield error_msg
+                except GeneratorExit:
+                    raise
+                except:
+                    pass
+                return
+        
+            total_duration_ms = sum(durations)
+            total_duration_hours = total_duration_ms / 3600000
+            print(f"[Console] Total duration: {total_duration_hours:.2f} hours ({total_duration_ms/1000:.0f} seconds)", file=sys.stderr)
+
+            # Build batches using retrieved durations
+            print(f"[Console] Step 2/4: Building batches (max {max_duration_ms/3600000:.1f} hours per batch)...", file=sys.stderr)
+            progress_callback(0.25, "Building batches...")
+            for i, (audio_file, file_duration) in enumerate(zip(audio_files, durations), 1):
+                additional_duration = file_duration + (10000 if current_batch else 0)
+                if current_duration + additional_duration > max_duration_ms and current_batch:
+                    batches.append(current_batch)
+                    print(f"[Console]   Batch {len(batches)}: {len(current_batch)} files, {current_duration/1000:.0f}s", file=sys.stderr)
+                    current_batch = [audio_file]
+                    current_duration = file_duration
+                else:
+                    if current_batch:
+                        current_duration += 10000
+                    current_batch.append(audio_file)
+                    current_duration += file_duration
+                if i % 100 == 0:
+                    print(f"[Console]   Processed {i}/{len(audio_files)} files...", file=sys.stderr)
+                    if webui_connected:
+                        try:
+                            yield f"Building batches: {i}/{len(audio_files)} files processed..."
+                        except GeneratorExit:
+                            # GeneratorExit means webui disconnected, continue processing
+                            webui_connected = False
+                            print(f"[Console] WebUI disconnected, continuing in background...", file=sys.stderr)
+                            # Don't re-raise GeneratorExit, continue processing
+                        except:
+                            webui_connected = False
+                            print(f"[Console] WebUI connection error, continuing in background...", file=sys.stderr)
+            if current_batch:
                 batches.append(current_batch)
                 print(f"[Console]   Batch {len(batches)}: {len(current_batch)} files, {current_duration/1000:.0f}s", file=sys.stderr)
-                current_batch = [audio_file]
-                current_duration = file_duration
-            else:
-                if current_batch:
-                    current_duration += 10000
-                current_batch.append(audio_file)
-                current_duration += file_duration
-            if i % 100 == 0:
-                print(f"[Console]   Processed {i}/{len(audio_files)} files...", file=sys.stderr)
-                try:
-                    yield f"Building batches: {i}/{len(audio_files)} files processed..."
-                except:
-                    pass  # Continue processing even if webui disconnected
-        if current_batch:
-            batches.append(current_batch)
-            print(f"[Console]   Batch {len(batches)}: {len(current_batch)} files, {current_duration/1000:.0f}s", file=sys.stderr)
-        total_batches = len(batches)
-        print(f"[Console] Created {total_batches} batch(es)", file=sys.stderr)
+            total_batches = len(batches)
+            print(f"[Console] Created {total_batches} batch(es)", file=sys.stderr)
         
-        # Combine batches sequentially using numpy and soundfile instead of multiprocessing
-        print(f"[Console] Step 3/4: Processing {total_batches} batch(es)...", file=sys.stderr)
-        progress_callback(0.5, 'Processing batches...')
-        import soundfile as sf
-        import numpy as np
-        messages = []
-        skipped_count = 0
-        
-        for idx, batch in enumerate(batches, start=1):
-            # Determine output filename
-            out_name = 'combined.wav' if len(batches) == 1 else f'combined_{idx}.wav'
-            output_path = wavs_folder / out_name
+            # Combine batches sequentially using numpy and soundfile instead of multiprocessing
+            print(f"[Console] Step 3/4: Processing {total_batches} batch(es)...", file=sys.stderr)
+            progress_callback(0.5, 'Processing batches...')
+            import soundfile as sf
+            import numpy as np
+            messages = []
+            skipped_count = 0
             
-            # Check if file already exists (resume support)
-            if output_path.exists():
+            for idx, batch in enumerate(batches, start=1):
+                # Determine output filename
+                out_name = 'combined.wav' if len(batches) == 1 else f'combined_{idx}.wav'
+                output_path = wavs_folder / out_name
+                
+                # Check if file already exists (resume support)
+                if output_path.exists():
+                    file_size_mb = output_path.stat().st_size / (1024 * 1024)
+                    try:
+                        # Verify file is valid by reading its duration
+                        info = sf.info(str(output_path))
+                        duration_sec = info.duration
+                        msg = f'Batch {idx}/{total_batches}: skipped (already exists: {out_name}, {duration_sec:.0f}s, {file_size_mb:.1f} MB).'
+                        messages.append(msg)
+                        print(f"[Console]   ⊘ {msg}", file=sys.stderr)
+                        skipped_count += 1
+                        if webui_connected:
+                            try:
+                                yield f"Skipping batch {idx}/{total_batches} (already exists)...\n" + '\n'.join(messages)
+                            except GeneratorExit:
+                                webui_connected = False
+                                print(f"[Console] WebUI disconnected, continuing in background...", file=sys.stderr)
+                            except:
+                                webui_connected = False
+                        continue
+                    except Exception as e:
+                        # File exists but may be corrupted, re-process it
+                        print(f"[Console]   Warning: {out_name} exists but may be corrupted, re-processing...", file=sys.stderr)
+                        output_path.unlink()  # Remove corrupted file
+            
+                print(f"[Console]   Processing batch {idx}/{total_batches} ({len(batch)} files)...", file=sys.stderr)
+                if webui_connected:
+                    try:
+                        yield f"Processing batch {idx}/{total_batches} ({len(batch)} files)..."
+                    except GeneratorExit:
+                        webui_connected = False
+                        print(f"[Console] WebUI disconnected, continuing in background...", file=sys.stderr)
+                    except:
+                        webui_connected = False
+            
+                # Read first file to get sample rate and build silence buffer
+                first_data, sr = sf.read(str(batch[0]), dtype='float32')
+                if first_data.ndim == 1:
+                    silence = np.zeros(int(sr * 10), dtype=np.float32)
+                else:
+                    silence = np.zeros((int(sr * 10), first_data.shape[1]), dtype=np.float32)
+                parts = []
+                for file_idx, file in enumerate(batch, 1):
+                    print(f"[Console]     Reading file {file_idx}/{len(batch)}: {file.name}", file=sys.stderr)
+                    data, _ = sf.read(str(file), dtype='float32')
+                    parts.append(data)
+                    parts.append(silence)
+                    if file_idx % 50 == 0 and webui_connected:
+                        try:
+                            yield f"Batch {idx}/{total_batches}: Reading file {file_idx}/{len(batch)}..."
+                        except GeneratorExit:
+                            webui_connected = False
+                            print(f"[Console] WebUI disconnected, continuing in background...", file=sys.stderr)
+                        except:
+                            webui_connected = False
+                if parts:
+                    parts = parts[:-1]
+                print(f"[Console]     Concatenating {len(parts)} segments...", file=sys.stderr)
+                if webui_connected:
+                    try:
+                        yield f"Batch {idx}/{total_batches}: Concatenating audio..."
+                    except GeneratorExit:
+                        webui_connected = False
+                        print(f"[Console] WebUI disconnected, continuing in background...", file=sys.stderr)
+                    except:
+                        webui_connected = False
+                combined = np.concatenate(parts)
+                # Write combined audio
+                print(f"[Console]     Writing {out_name}...", file=sys.stderr)
+                if webui_connected:
+                    try:
+                        yield f"Batch {idx}/{total_batches}: Writing {out_name}..."
+                    except GeneratorExit:
+                        webui_connected = False
+                        print(f"[Console] WebUI disconnected, continuing in background...", file=sys.stderr)
+                    except:
+                        webui_connected = False
+                sf.write(str(output_path), combined, sr)
+                # Report progress
+                duration_sec = combined.shape[0] // sr
                 file_size_mb = output_path.stat().st_size / (1024 * 1024)
-                try:
-                    # Verify file is valid by reading its duration
-                    info = sf.info(str(output_path))
-                    duration_sec = info.duration
-                    msg = f'Batch {idx}/{total_batches}: skipped (already exists: {out_name}, {duration_sec:.0f}s, {file_size_mb:.1f} MB).'
-                    messages.append(msg)
-                    print(f"[Console]   ⊘ {msg}", file=sys.stderr)
-                    skipped_count += 1
+                msg = f'Batch {idx}/{total_batches}: saved as {out_name} ({duration_sec} seconds, {file_size_mb:.1f} MB).'
+                messages.append(msg)
+                print(f"[Console]   ✓ {msg}", file=sys.stderr)
+                if webui_connected:
                     try:
-                        yield f"Skipping batch {idx}/{total_batches} (already exists)...\n" + '\n'.join(messages)
+                        yield '\n'.join(messages)
+                    except GeneratorExit:
+                        webui_connected = False
+                        print(f"[Console] WebUI disconnected, continuing in background...", file=sys.stderr)
                     except:
-                        pass  # Continue processing even if webui disconnected
-                    continue
-                except Exception as e:
-                    # File exists but may be corrupted, re-process it
-                    print(f"[Console]   Warning: {out_name} exists but may be corrupted, re-processing...", file=sys.stderr)
-                    output_path.unlink()  # Remove corrupted file
-            
-            print(f"[Console]   Processing batch {idx}/{total_batches} ({len(batch)} files)...", file=sys.stderr)
-            try:
-                yield f"Processing batch {idx}/{total_batches} ({len(batch)} files)..."
-            except:
-                pass  # Continue processing even if webui disconnected
-            
-            # Read first file to get sample rate and build silence buffer
-            first_data, sr = sf.read(str(batch[0]), dtype='float32')
-            if first_data.ndim == 1:
-                silence = np.zeros(int(sr * 10), dtype=np.float32)
-            else:
-                silence = np.zeros((int(sr * 10), first_data.shape[1]), dtype=np.float32)
-            parts = []
-            for file_idx, file in enumerate(batch, 1):
-                print(f"[Console]     Reading file {file_idx}/{len(batch)}: {file.name}", file=sys.stderr)
-                data, _ = sf.read(str(file), dtype='float32')
-                parts.append(data)
-                parts.append(silence)
-                if file_idx % 50 == 0:
-                    try:
-                        yield f"Batch {idx}/{total_batches}: Reading file {file_idx}/{len(batch)}..."
-                    except:
-                        pass  # Continue processing even if webui disconnected
-            if parts:
-                parts = parts[:-1]
-            print(f"[Console]     Concatenating {len(parts)} segments...", file=sys.stderr)
-            try:
-                yield f"Batch {idx}/{total_batches}: Concatenating audio..."
-            except:
-                pass  # Continue processing even if webui disconnected
-            combined = np.concatenate(parts)
-            # Write combined audio
-            print(f"[Console]     Writing {out_name}...", file=sys.stderr)
-            try:
-                yield f"Batch {idx}/{total_batches}: Writing {out_name}..."
-            except:
-                pass  # Continue processing even if webui disconnected
-            sf.write(str(output_path), combined, sr)
-            # Report progress
-            duration_sec = combined.shape[0] // sr
-            file_size_mb = output_path.stat().st_size / (1024 * 1024)
-            msg = f'Batch {idx}/{total_batches}: saved as {out_name} ({duration_sec} seconds, {file_size_mb:.1f} MB).'
-            messages.append(msg)
-            print(f"[Console]   ✓ {msg}", file=sys.stderr)
-            try:
-                yield '\n'.join(messages)
-            except:
-                pass  # Continue processing even if webui disconnected
+                        webui_connected = False
         
-        if skipped_count > 0:
-            print(f"[Console] Skipped {skipped_count} already-completed batch(es)", file=sys.stderr)
-        
-        # Move original wav files to uncombined folder (only if not already moved)
-        print(f"[Console] Step 4/4: Moving {len(audio_files)} original files to uncombined_wavs folder...", file=sys.stderr)
-        progress_callback(0.75, 'Finishing up and moving original wav files.')
-        import shutil
-        moved_count = 0
-        skipped_move_count = 0
-        for i, f in enumerate(audio_files, 1):
-            # Check if file already exists in uncombined folder (resume support)
-            dest_path = uncombined_folder / f.name
-            if dest_path.exists():
-                # File already moved, just remove from wavs folder if it still exists
-                if f.exists():
-                    f.unlink()
-                skipped_move_count += 1
-            else:
-                # File not moved yet, move it
-                if f.exists():
-                    shutil.copy(str(f), str(dest_path))
-                    f.unlink()
-                    moved_count += 1
-            if i % 100 == 0:
-                print(f"[Console]   Processed {i}/{len(audio_files)} files (moved: {moved_count}, already moved: {skipped_move_count})...", file=sys.stderr)
+            if skipped_count > 0:
+                print(f"[Console] Skipped {skipped_count} already-completed batch(es)", file=sys.stderr)
+            
+            # Move original wav files to uncombined folder (only if not already moved)
+            print(f"[Console] Step 4/4: Moving {len(audio_files)} original files to uncombined_wavs folder...", file=sys.stderr)
+            progress_callback(0.75, 'Finishing up and moving original wav files.')
+            import shutil
+            moved_count = 0
+            skipped_move_count = 0
+            for i, f in enumerate(audio_files, 1):
+                # Check if file already exists in uncombined folder (resume support)
+                dest_path = uncombined_folder / f.name
+                if dest_path.exists():
+                    # File already moved, just remove from wavs folder if it still exists
+                    if f.exists():
+                        f.unlink()
+                    skipped_move_count += 1
+                else:
+                    # File not moved yet, move it
+                    if f.exists():
+                        shutil.copy(str(f), str(dest_path))
+                        f.unlink()
+                        moved_count += 1
+                if i % 100 == 0:
+                    print(f"[Console]   Processed {i}/{len(audio_files)} files (moved: {moved_count}, already moved: {skipped_move_count})...", file=sys.stderr)
+                    if webui_connected:
+                        try:
+                            yield f"Moving files: {i}/{len(audio_files)} (moved: {moved_count}, skipped: {skipped_move_count})..."
+                        except GeneratorExit:
+                            webui_connected = False
+                            print(f"[Console] WebUI disconnected, continuing in background...", file=sys.stderr)
+                        except:
+                            webui_connected = False
+            
+            if skipped_move_count > 0:
+                print(f"[Console] Skipped moving {skipped_move_count} already-moved files", file=sys.stderr)
+            
+            processed_count = total_batches - skipped_count
+            final_msg = f"Combination complete! Processed {processed_count} batch(es), skipped {skipped_count} already-completed batch(es)."
+            print(f"[Console] ✓ {final_msg}", file=sys.stderr)
+            if webui_connected:
                 try:
-                    yield f"Moving files: {i}/{len(audio_files)} (moved: {moved_count}, skipped: {skipped_move_count})..."
+                    yield '\n'.join(messages + [final_msg])
+                except GeneratorExit:
+                    pass  # Final message, webui may have disconnected but processing is complete
                 except:
-                    pass  # Continue processing even if webui disconnected
-        
-        if skipped_move_count > 0:
-            print(f"[Console] Skipped moving {skipped_move_count} already-moved files", file=sys.stderr)
-        
-        processed_count = total_batches - skipped_count
-        final_msg = f"Combination complete! Processed {processed_count} batch(es), skipped {skipped_count} already-completed batch(es)."
-        print(f"[Console] ✓ {final_msg}", file=sys.stderr)
-        try:
-            yield '\n'.join(messages + [final_msg])
-        except:
-            pass  # Final message, webui may have disconnected but processing is complete
+                    pass
+        except GeneratorExit:
+            # GeneratorExit means webui disconnected - continue processing
+            # We suppress GeneratorExit to allow processing to continue
+            # This will cause a warning "generator ignored GeneratorExit" but processing will complete
+            print(f"[Console] WebUI disconnected (GeneratorExit), continuing processing in background...", file=sys.stderr)
+            # Continue processing without re-raising GeneratorExit
+            # Note: This will cause a warning, but ensures processing completes
+            pass
 
 def get_resume_status(project: str):
     """
