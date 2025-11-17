@@ -430,15 +430,21 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         The output files are saved in the same folder with names 'combined.wav' (if one batch)
         or 'combined_1.wav', 'combined_2.wav', etc.
         """
+        import sys
+        
         if not project:
-            yield "No project selected."
+            msg = "No project selected."
+            print(msg, file=sys.stderr)
+            yield msg
             return
         project_base = DATASETS_FOLDER / project
         wavs_folder = project_base / "wavs"
         uncombined_folder = project_base / "uncombined_wavs"
         uncombined_folder.mkdir(parents=True, exist_ok=True)
         if not wavs_folder.exists():
-            yield "Wavs folder not found in project."
+            msg = "Wavs folder not found in project."
+            print(msg, file=sys.stderr)
+            yield msg
             return
         audio_files = [
             f
@@ -446,14 +452,21 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
             for f in wavs_folder.glob(f"*{ext}")
         ]
         if not audio_files:
-            yield "No audio files found in the project's wavs folder."
+            msg = "No audio files found in the project's wavs folder."
+            print(msg, file=sys.stderr)
+            yield msg
             return
+
+        print(f"[Console] Found {len(audio_files)} audio files to combine", file=sys.stderr)
+        print(f"[Console] Starting combination process...", file=sys.stderr)
 
         try:
             from pydub import AudioSegment
             from pydub.utils import mediainfo
         except ImportError:
-            yield "pydub module is not installed. Please install it via pip install pydub"
+            msg = "pydub module is not installed. Please install it via pip install pydub"
+            print(msg, file=sys.stderr)
+            yield msg
             return
         max_duration_ms = 2 * 60 * 60 * 1000
         silence = AudioSegment.silent(duration=10000)
@@ -462,20 +475,29 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
         current_duration = 0
 
         # Retrieve durations in parallel using multiprocessing
+        print(f"[Console] Step 1/4: Calculating durations for {len(audio_files)} files...", file=sys.stderr)
         progress_callback(0, "Calculating durations...")
         try:
             with multiprocessing.Pool() as pool:
                 durations = pool.map(_get_duration, audio_files)
         except Exception as e:
-            yield str(e)
+            error_msg = f"Error calculating durations: {str(e)}"
+            print(f"[Console] ERROR: {error_msg}", file=sys.stderr)
+            yield error_msg
             return
+        
+        total_duration_ms = sum(durations)
+        total_duration_hours = total_duration_ms / 3600000
+        print(f"[Console] Total duration: {total_duration_hours:.2f} hours ({total_duration_ms/1000:.0f} seconds)", file=sys.stderr)
 
         # Build batches using retrieved durations
+        print(f"[Console] Step 2/4: Building batches (max {max_duration_ms/3600000:.1f} hours per batch)...", file=sys.stderr)
         progress_callback(0.25, "Building batches...")
-        for audio_file, file_duration in zip(audio_files, durations):
+        for i, (audio_file, file_duration) in enumerate(zip(audio_files, durations), 1):
             additional_duration = file_duration + (10000 if current_batch else 0)
             if current_duration + additional_duration > max_duration_ms and current_batch:
                 batches.append(current_batch)
+                print(f"[Console]   Batch {len(batches)}: {len(current_batch)} files, {current_duration/1000:.0f}s", file=sys.stderr)
                 current_batch = [audio_file]
                 current_duration = file_duration
             else:
@@ -483,15 +505,25 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
                     current_duration += 10000
                 current_batch.append(audio_file)
                 current_duration += file_duration
+            if i % 100 == 0:
+                print(f"[Console]   Processed {i}/{len(audio_files)} files...", file=sys.stderr)
+                yield f"Building batches: {i}/{len(audio_files)} files processed..."
         if current_batch:
             batches.append(current_batch)
+            print(f"[Console]   Batch {len(batches)}: {len(current_batch)} files, {current_duration/1000:.0f}s", file=sys.stderr)
         total_batches = len(batches)
+        print(f"[Console] Created {total_batches} batch(es)", file=sys.stderr)
+        
         # Combine batches sequentially using numpy and soundfile instead of multiprocessing
+        print(f"[Console] Step 3/4: Processing {total_batches} batch(es)...", file=sys.stderr)
         progress_callback(0.5, 'Processing batches...')
         import soundfile as sf
         import numpy as np
         messages = []
         for idx, batch in enumerate(batches, start=1):
+            print(f"[Console]   Processing batch {idx}/{total_batches} ({len(batch)} files)...", file=sys.stderr)
+            yield f"Processing batch {idx}/{total_batches} ({len(batch)} files)..."
+            
             # Read first file to get sample rate and build silence buffer
             first_data, sr = sf.read(str(batch[0]), dtype='float32')
             if first_data.ndim == 1:
@@ -499,28 +531,47 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
             else:
                 silence = np.zeros((int(sr * 10), first_data.shape[1]), dtype=np.float32)
             parts = []
-            for file in batch:
+            for file_idx, file in enumerate(batch, 1):
+                print(f"[Console]     Reading file {file_idx}/{len(batch)}: {file.name}", file=sys.stderr)
                 data, _ = sf.read(str(file), dtype='float32')
                 parts.append(data)
                 parts.append(silence)
+                if file_idx % 50 == 0:
+                    yield f"Batch {idx}/{total_batches}: Reading file {file_idx}/{len(batch)}..."
             if parts:
                 parts = parts[:-1]
+            print(f"[Console]     Concatenating {len(parts)} segments...", file=sys.stderr)
+            yield f"Batch {idx}/{total_batches}: Concatenating audio..."
             combined = np.concatenate(parts)
             # Determine output filename
             out_name = 'combined.wav' if len(batches) == 1 else f'combined_{idx}.wav'
             output_path = wavs_folder / out_name
             # Write combined audio
+            print(f"[Console]     Writing {out_name}...", file=sys.stderr)
+            yield f"Batch {idx}/{total_batches}: Writing {out_name}..."
             sf.write(str(output_path), combined, sr)
             # Report progress
             duration_sec = combined.shape[0] // sr
-            messages.append(f'Batch {idx}: saved as {out_name} ({duration_sec} seconds).')
+            file_size_mb = output_path.stat().st_size / (1024 * 1024)
+            msg = f'Batch {idx}/{total_batches}: saved as {out_name} ({duration_sec} seconds, {file_size_mb:.1f} MB).'
+            messages.append(msg)
+            print(f"[Console]   ✓ {msg}", file=sys.stderr)
             yield '\n'.join(messages)
+        
         # Move original wav files to uncombined folder
+        print(f"[Console] Step 4/4: Moving {len(audio_files)} original files to uncombined_wavs folder...", file=sys.stderr)
         progress_callback(0.75, 'Finishing up and moving original wav files.')
         import shutil
-        for f in audio_files:
+        for i, f in enumerate(audio_files, 1):
             shutil.copy(str(f), str(uncombined_folder / f.name))
             f.unlink()
+            if i % 100 == 0:
+                print(f"[Console]   Moved {i}/{len(audio_files)} files...", file=sys.stderr)
+                yield f"Moving files: {i}/{len(audio_files)}..."
+        
+        final_msg = f"Combination complete! Created {total_batches} file(s)."
+        print(f"[Console] ✓ {final_msg}", file=sys.stderr)
+        yield '\n'.join(messages + [final_msg])
 
 def get_resume_status(project: str):
     """
