@@ -82,6 +82,7 @@ def copy_audio_files(
     output_dir: Path,
     split: str = "train",
     preserve_structure: bool = False,
+    max_duration_hours: float = 1100.0,
 ) -> None:
     """
     Copy audio files based on TSV file.
@@ -92,6 +93,7 @@ def copy_audio_files(
         output_dir: Output directory for copied files
         split: Dataset split (train, dev, test)
         preserve_structure: If True, preserve directory structure; if False, flatten to output_dir
+        max_duration_hours: Maximum total duration in hours. Stop copying when exceeded (default: 1100.0)
     """
     print(f"Loading segment IDs from {tsv_file}...")
     segment_ids = load_segment_ids(tsv_file)
@@ -103,14 +105,25 @@ def copy_audio_files(
     copied_count = 0
     missing_count = 0
     error_count = 0
+    skipped_count = 0
     total_duration = 0.0
+    max_duration_seconds = max_duration_hours * 3600.0
     
     print(f"\nCopying audio files to {output_dir}...")
     print(f"Source directory: {source_dir / split}")
-    print(f"Preserve structure: {preserve_structure}\n")
+    print(f"Preserve structure: {preserve_structure}")
+    print(f"Max duration limit: {max_duration_hours} hours ({max_duration_seconds/3600:.1f} hours)\n")
+    
+    stopped_by_limit = False
     
     with tqdm(total=len(segment_ids), desc="Copying files") as pbar:
         for segment_id in segment_ids:
+            # Check if we've reached the duration limit
+            if total_duration >= max_duration_seconds:
+                stopped_by_limit = True
+                print(f"\n⚠️  Reached maximum duration limit ({max_duration_hours} hours). Stopping copy.", file=sys.stderr)
+                break
+            
             try:
                 # Get source path
                 source_path = get_audio_path(source_dir, split, segment_id)
@@ -128,6 +141,22 @@ def copy_audio_files(
                 
                 # Get duration
                 duration = get_duration(source_path)
+                
+                # Check if adding this file would exceed the limit
+                if total_duration + duration > max_duration_seconds:
+                    skipped_count += 1
+                    pbar.set_postfix({
+                        "copied": copied_count,
+                        "missing": missing_count,
+                        "errors": error_count,
+                        "skipped": skipped_count,
+                        "duration": f"{total_duration/3600:.1f}h"
+                    })
+                    pbar.update(1)
+                    stopped_by_limit = True
+                    print(f"\n⚠️  Adding {segment_id} would exceed limit. Stopping copy.", file=sys.stderr)
+                    break
+                
                 total_duration += duration
                 
                 # Determine destination path
@@ -152,6 +181,7 @@ def copy_audio_files(
                     "copied": copied_count,
                     "missing": missing_count,
                     "errors": error_count,
+                    "skipped": skipped_count,
                     "duration": f"{total_duration/3600:.1f}h"
                 })
                 
@@ -162,6 +192,7 @@ def copy_audio_files(
                     "copied": copied_count,
                     "missing": missing_count,
                     "errors": error_count,
+                    "skipped": skipped_count,
                     "duration": f"{total_duration/3600:.1f}h"
                 })
             
@@ -170,10 +201,13 @@ def copy_audio_files(
     # Print summary
     print(f"\n{'='*60}")
     print(f"Copy Summary:")
-    print(f"  Total segments: {len(segment_ids)}")
+    print(f"  Total segments in TSV: {len(segment_ids)}")
     print(f"  Successfully copied: {copied_count}")
     print(f"  Missing files: {missing_count}")
     print(f"  Errors: {error_count}")
+    if stopped_by_limit:
+        print(f"  Skipped (due to limit): {skipped_count}")
+        print(f"  ⚠️  Stopped early due to duration limit ({max_duration_hours} hours)")
     print(f"  Total duration: {total_duration:.2f} seconds ({total_duration/3600:.2f} hours)")
     print(f"  Output directory: {output_dir}")
     print(f"{'='*60}")
@@ -213,6 +247,12 @@ def main():
         action="store_true",
         help="Preserve directory structure in output (default: flatten to single directory)",
     )
+    parser.add_argument(
+        "--max-duration-hours",
+        type=float,
+        default=1100.0,
+        help="Maximum total duration in hours. Stop copying when exceeded (default: 1100.0)",
+    )
     
     args = parser.parse_args()
     
@@ -234,6 +274,7 @@ def main():
         output_dir=args.output_dir,
         split=args.split,
         preserve_structure=args.preserve_structure,
+        max_duration_hours=args.max_duration_hours,
     )
 
 
