@@ -387,10 +387,22 @@ def process_batch_func(args):
 
 # Helper for multiprocessing duration retrieval
 def _get_duration(file):
-    from pydub.utils import mediainfo
     try:
-        info = mediainfo(str(file))
-        return float(info["duration"]) * 1000
+        import soundfile as sf
+        info = sf.info(str(file))
+        return info.duration * 1000  # Convert to milliseconds
+    except ImportError:
+        # Fallback to ffprobe if soundfile not available
+        import subprocess
+        try:
+            result = subprocess.run([
+                'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                '-of', 'csv=p=0', str(file)
+            ], capture_output=True, text=True, check=True)
+            duration_seconds = float(result.stdout.strip())
+            return duration_seconds * 1000  # Convert to milliseconds
+        except Exception as e:
+            raise RuntimeError(f"Error retrieving duration for {file.name}: {str(e)}")
     except Exception as e:
         raise RuntimeError(f"Error retrieving duration for {file.name}: {str(e)}")
 
