@@ -254,17 +254,33 @@ def main():
     # Process files
     success_count = 0
     fail_count = 0
+    processed_files = []
+    failed_files = []
     
     for audio_path in tqdm(wav_files, desc="Processing audio files"):
         if process_audio_file(audio_path, separator, backup=args.backup):
             success_count += 1
+            processed_files.append(audio_path)
         else:
             fail_count += 1
+            failed_files.append(audio_path)
     
     print(f"\nProcessing complete!")
     print(f"  Success: {success_count}")
     print(f"  Failed: {fail_count}")
     print(f"  Total: {len(wav_files)}")
+    
+    # Print processed files
+    if processed_files:
+        print(f"\n✓ Successfully processed {len(processed_files)} files:")
+        for audio_path in processed_files:
+            print(f"  {audio_path}")
+    
+    # Print failed files if any
+    if failed_files:
+        print(f"\n✗ Failed to process {len(failed_files)} files:")
+        for audio_path in failed_files:
+            print(f"  {audio_path}")
 
 
 if __name__ == "__main__":
