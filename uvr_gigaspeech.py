@@ -18,8 +18,10 @@ import argparse
 import json
 import shutil
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 import librosa
 import numpy as np
@@ -181,6 +183,12 @@ def main():
         default=None,
         help="Maximum number of files to process (for testing)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="Number of concurrent workers (default: 4)",
+    )
     
     args = parser.parse_args()
     
@@ -224,17 +232,6 @@ def main():
                      f"  Tried: {args.config.parent / uvr_model_path_str}\n"
                      f"  Tried: {Path.cwd() / uvr_model_path_str}")
     
-    # Initialize UVR separator
-    print(f"Initializing UVR separator with model: {uvr_model_path}")
-    try:
-        separator = UVRSeparator(
-            uvr_model_path,
-            metadata_json=cfg["separate"]["step1"].get("metadata_json"),
-        )
-        print(f"UVR separator initialized successfully")
-    except Exception as e:
-        parser.error(f"Failed to initialize UVR separator: {e}")
-    
     # Load audio files from JSONL
     wav_files = load_audio_files_from_jsonl(args.jsonl, args.gigaspeech_root)
     
@@ -251,19 +248,58 @@ def main():
     if args.backup:
         print("Backup mode enabled: original files will be saved as .wav.backup")
     
-    # Process files
+    # Initialize UVR separator (will be created per worker)
+    print(f"UVR model path: {uvr_model_path}")
+    print(f"Metadata JSON: {cfg['separate']['step1'].get('metadata_json')}")
+    
+    # Process files with concurrency
     success_count = 0
     fail_count = 0
+    write_lock = threading.Lock()  # For thread-safe printing
     
-    for audio_path in tqdm(wav_files, desc="Processing audio files"):
-        if process_audio_file(audio_path, separator, backup=args.backup):
-            success_count += 1
-            # Print immediately after each successful processing
-            print(f"✓ Processed: {audio_path}", flush=True)
-        else:
-            fail_count += 1
-            # Print immediately after each failed processing
-            print(f"✗ Failed: {audio_path}", flush=True)
+    # Thread-local storage for separator (one per worker)
+    separator_local = threading.local()
+    
+    def get_separator() -> UVRSeparator:
+        """Get or create separator for current thread."""
+        if not hasattr(separator_local, 'separator'):
+            separator_local.separator = UVRSeparator(
+                uvr_model_path,
+                metadata_json=cfg["separate"]["step1"].get("metadata_json"),
+            )
+        return separator_local.separator
+    
+    def process_with_print(audio_path: Path) -> Tuple[Path, bool]:
+        """Process a file and return (path, success)."""
+        # Get thread-local separator
+        worker_separator = get_separator()
+        success = process_audio_file(audio_path, worker_separator, backup=args.backup)
+        # Thread-safe printing
+        with write_lock:
+            if success:
+                print(f"✓ Processed: {audio_path}", flush=True)
+            else:
+                print(f"✗ Failed: {audio_path}", flush=True)
+        return audio_path, success
+    
+    # Use ThreadPoolExecutor for concurrent processing
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        # Submit all tasks
+        futures = {executor.submit(process_with_print, audio_path): audio_path 
+                   for audio_path in wav_files}
+        
+        # Process completed tasks with progress bar
+        for future in tqdm(as_completed(futures), total=len(wav_files), desc="Processing audio files"):
+            try:
+                _, success = future.result()
+                if success:
+                    success_count += 1
+                else:
+                    fail_count += 1
+            except Exception as e:
+                audio_path = futures[future]
+                print(f"✗ Exception processing {audio_path}: {e}", flush=True)
+                fail_count += 1
     
     print(f"\nProcessing complete!")
     print(f"  Success: {success_count}")
