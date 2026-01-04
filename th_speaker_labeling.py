@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import json
+import shutil
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -174,7 +175,8 @@ def process_group(
     dir_name: str,
     silence_duration: float = 0.5,
     target_sample_rate: int = 24000,
-    uvr_workers: int = 8
+    uvr_workers: int = 8,
+    skip_uvr: bool = False
 ) -> List[Dict[str, Any]]:
     """
     Process a single group: UVR, combine, diarize, and map speakers.
@@ -182,66 +184,86 @@ def process_group(
     """
     entries = []
     
-    # Step 1: Process all files with UVR (parallel processing)
-    print(f"Processing group {group_prefix}: UVR processing {len(group_files)} files...", file=sys.stderr)
-    uvr_files = []
-    
-    # Use thread-local storage for separator to avoid conflicts
-    separator_local = threading.local()
-    
-    def get_separator():
-        """Get thread-local separator."""
-        if not hasattr(separator_local, 'separator'):
-            separator_local.separator = models["separator"]
-        return separator_local.separator
-    
-    def process_single_uvr(audio_file: Path) -> Tuple[Path, bool, bool]:
-        """Process a single file with UVR, returns (output_file, success, was_skipped)."""
-        separator = get_separator()
-        return process_uvr_file(
-            audio_file,
-            separator,
-            output_audio_dir,
-            target_sample_rate
-        )
-    
-    # Process files in parallel using ThreadPoolExecutor
-    max_workers = min(uvr_workers, len(group_files))
-    skipped_count = 0
-    processed_count = 0
-    failed_count = 0
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_single_uvr, audio_file): audio_file 
-                   for audio_file in group_files}
+    # Step 1: Process files (UVR or skip)
+    if skip_uvr:
+        print(f"Processing group {group_prefix}: Using original audio files (UVR skipped)...", file=sys.stderr)
+        # Use original files directly, but copy to output directory for consistency
+        audio_files_to_use = []
+        for audio_file in group_files:
+            output_file = output_audio_dir / audio_file.name
+            if not output_file.exists():
+                # Copy original file to output directory
+                try:
+                    shutil.copy2(audio_file, output_file)
+                except Exception as e:
+                    print(f"Error copying {audio_file} to {output_file}: {e}", file=sys.stderr)
+                    continue
+            if output_file.exists():
+                audio_files_to_use.append(output_file)
+            else:
+                # Fallback to original file if copy failed
+                audio_files_to_use.append(audio_file)
+        uvr_files = audio_files_to_use
+    else:
+        print(f"Processing group {group_prefix}: UVR processing {len(group_files)} files...", file=sys.stderr)
+        uvr_files = []
         
-        # Process completed tasks with progress indication
-        for future in tqdm(as_completed(futures), total=len(group_files), 
-                         desc=f"UVR {group_prefix}", leave=False, file=sys.stderr):
-            try:
-                uvr_file, success, was_skipped = future.result()
-                if success and uvr_file:
-                    if was_skipped:
-                        skipped_count += 1
+        # Use thread-local storage for separator to avoid conflicts
+        separator_local = threading.local()
+        
+        def get_separator():
+            """Get thread-local separator."""
+            if not hasattr(separator_local, 'separator'):
+                separator_local.separator = models["separator"]
+            return separator_local.separator
+        
+        def process_single_uvr(audio_file: Path) -> Tuple[Path, bool, bool]:
+            """Process a single file with UVR, returns (output_file, success, was_skipped)."""
+            separator = get_separator()
+            return process_uvr_file(
+                audio_file,
+                separator,
+                output_audio_dir,
+                target_sample_rate
+            )
+        
+        # Process files in parallel using ThreadPoolExecutor
+        max_workers = min(uvr_workers, len(group_files))
+        skipped_count = 0
+        processed_count = 0
+        failed_count = 0
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_single_uvr, audio_file): audio_file 
+                       for audio_file in group_files}
+            
+            # Process completed tasks with progress indication
+            for future in tqdm(as_completed(futures), total=len(group_files), 
+                             desc=f"UVR {group_prefix}", leave=False, file=sys.stderr):
+                try:
+                    uvr_file, success, was_skipped = future.result()
+                    if success and uvr_file:
+                        if was_skipped:
+                            skipped_count += 1
+                        else:
+                            processed_count += 1
+                        uvr_files.append(uvr_file)
                     else:
-                        processed_count += 1
-                    uvr_files.append(uvr_file)
-                else:
+                        failed_count += 1
+                except Exception as e:
+                    audio_file = futures[future]
+                    print(f"Error processing {audio_file}: {e}", file=sys.stderr)
                     failed_count += 1
-            except Exception as e:
-                audio_file = futures[future]
-                print(f"Error processing {audio_file}: {e}", file=sys.stderr)
-                failed_count += 1
-    
-    if skipped_count > 0:
-        print(f"  Skipped {skipped_count} already-processed files", file=sys.stderr)
-    if processed_count > 0:
-        print(f"  Processed {processed_count} new files", file=sys.stderr)
-    if failed_count > 0:
-        print(f"  Failed {failed_count} files", file=sys.stderr)
+        
+        if skipped_count > 0:
+            print(f"  Skipped {skipped_count} already-processed files", file=sys.stderr)
+        if processed_count > 0:
+            print(f"  Processed {processed_count} new files", file=sys.stderr)
+        if failed_count > 0:
+            print(f"  Failed {failed_count} files", file=sys.stderr)
     
     if not uvr_files:
-        print(f"Warning: No files processed for group {group_prefix}", file=sys.stderr)
+        print(f"Warning: No files available for group {group_prefix}", file=sys.stderr)
         return entries
     
     # Step 2: Combine audio files
@@ -443,6 +465,11 @@ def main():
         default=4,
         help="Number of parallel workers for UVR processing (default: 4)"
     )
+    parser.add_argument(
+        "--skip-uvr",
+        action="store_true",
+        help="Skip UVR processing and use original audio files directly"
+    )
     
     args = parser.parse_args()
     
@@ -534,7 +561,8 @@ def main():
             args.dir_name,
             args.silence_duration,
             target_sample_rate,
-            args.uvr_workers
+            args.uvr_workers,
+            args.skip_uvr
         )
         all_entries.extend(entries)
         print(f"Group {group_prefix}: Generated {len(entries)} entries.", file=sys.stderr)
