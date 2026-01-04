@@ -567,8 +567,8 @@ def main():
     groups = group_audio_files(audio_files)
     print(f"Grouped into {len(groups)} groups.", file=sys.stderr)
     
-    # Process each group
-    all_entries = []
+    # Process each group and write incrementally
+    total_new_entries = 0
     for group_idx, (group_prefix, group_files) in enumerate(groups.items(), 1):
         print(f"\n[{group_idx}/{len(groups)}] Processing group: {group_prefix}", file=sys.stderr)
         entries = process_group(
@@ -584,15 +584,17 @@ def main():
             args.uvr_workers,
             args.skip_uvr
         )
-        all_entries.extend(entries)
-        print(f"Group {group_prefix}: Generated {len(entries)} entries.", file=sys.stderr)
+        
+        # Write entries immediately after each group (incremental)
+        if entries:
+            generate_jsonl(entries, jsonl_path, append=True)
+            total_new_entries += len(entries)
+            print(f"Group {group_prefix}: Generated {len(entries)} entries (written to {jsonl_path.name}).", file=sys.stderr)
+        else:
+            print(f"Group {group_prefix}: No entries generated.", file=sys.stderr)
     
-    # Generate JSONL file (append mode to support resume)
-    # jsonl_path is already defined above
-    print(f"\nWriting to JSONL file: {jsonl_path}", file=sys.stderr)
-    generate_jsonl(all_entries, jsonl_path, append=True)
-    
-    print(f"\nComplete! Added {len(all_entries)} new entries to {jsonl_path}", file=sys.stderr)
+    print(f"\nComplete! Added {total_new_entries} new entries to {jsonl_path}", file=sys.stderr)
+    print(f"JSONL file location: {jsonl_path}", file=sys.stderr)
     print(f"Processed audio files saved to: {output_audio_dir}", file=sys.stderr)
 
 
