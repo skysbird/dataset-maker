@@ -539,12 +539,12 @@ def main():
         all_entries.extend(entries)
         print(f"Group {group_prefix}: Generated {len(entries)} entries.", file=sys.stderr)
     
-    # Generate JSONL file
+    # Generate JSONL file (append mode to support resume)
     jsonl_path = output_dir / f"{args.dir_name}_transcribed.jsonl"
     print(f"\nGenerating JSONL file: {jsonl_path}", file=sys.stderr)
-    generate_jsonl(all_entries, jsonl_path)
+    generate_jsonl(all_entries, jsonl_path, append=True)
     
-    print(f"\nComplete! Generated {len(all_entries)} entries in {jsonl_path}", file=sys.stderr)
+    print(f"\nComplete! Processed {len(all_entries)} entries in {jsonl_path}", file=sys.stderr)
     print(f"Processed audio files saved to: {output_audio_dir}", file=sys.stderr)
 
 
