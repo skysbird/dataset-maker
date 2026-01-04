@@ -17,6 +17,8 @@ Usage:
 import argparse
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Tuple, Any
@@ -26,6 +28,7 @@ import numpy as np
 import pandas as pd
 import soundfile as sf
 import torch
+from tqdm import tqdm
 
 # Import reusable functions
 from process_gigaspeech import combine_audio_group, map_emilia_segments_to_original, extract_segment_id_from_filename
@@ -124,27 +127,41 @@ def process_uvr_file(
     separator,
     output_audio_dir: Path,
     target_sample_rate: int = 24000
-) -> Path:
+) -> Tuple[Path, bool, bool]:
     """
     Process a single audio file with UVR (remove background, keep vocals only).
-    Returns the path to the processed file.
+    Returns (output_file_path, success, was_skipped).
     Note: The output file keeps the same name as the input file to ensure
     segment_id matching in boundaries.
     """
     # Keep the same filename to ensure segment_id consistency
     output_file = output_audio_dir / audio_file.name
     
-    # Use separate_sources to process the file
-    audio_dict = separate_sources(separator, str(audio_file), target_sample_rate)
+    # Skip if already processed
+    if output_file.exists():
+        try:
+            # Verify file is valid by checking it can be read
+            sf.info(str(output_file))
+            return output_file, True, True  # (file_path, success, was_skipped)
+        except Exception:
+            # File exists but may be corrupted, re-process it
+            pass
     
-    # Save the processed audio (vocals only)
-    sf.write(
-        str(output_file),
-        audio_dict["waveform"],
-        audio_dict["sample_rate"]
-    )
-    
-    return output_file
+    try:
+        # Use separate_sources to process the file
+        audio_dict = separate_sources(separator, str(audio_file), target_sample_rate)
+        
+        # Save the processed audio (vocals only)
+        sf.write(
+            str(output_file),
+            audio_dict["waveform"],
+            audio_dict["sample_rate"]
+        )
+        
+        return output_file, True, False  # (file_path, success, was_skipped)
+    except Exception as e:
+        print(f"Error processing {audio_file} with UVR: {e}", file=sys.stderr)
+        return None, False, False
 
 
 def process_group(
@@ -156,7 +173,8 @@ def process_group(
     output_audio_dir: Path,
     dir_name: str,
     silence_duration: float = 0.5,
-    target_sample_rate: int = 24000
+    target_sample_rate: int = 24000,
+    uvr_workers: int = 8
 ) -> List[Dict[str, Any]]:
     """
     Process a single group: UVR, combine, diarize, and map speakers.
@@ -164,21 +182,63 @@ def process_group(
     """
     entries = []
     
-    # Step 1: Process all files with UVR
+    # Step 1: Process all files with UVR (parallel processing)
     print(f"Processing group {group_prefix}: UVR processing {len(group_files)} files...", file=sys.stderr)
     uvr_files = []
-    for audio_file in group_files:
-        try:
-            uvr_file = process_uvr_file(
-                audio_file,
-                models["separator"],
-                output_audio_dir,
-                target_sample_rate
-            )
-            uvr_files.append(uvr_file)
-        except Exception as e:
-            print(f"Error processing {audio_file} with UVR: {e}", file=sys.stderr)
-            continue
+    
+    # Use thread-local storage for separator to avoid conflicts
+    separator_local = threading.local()
+    
+    def get_separator():
+        """Get thread-local separator."""
+        if not hasattr(separator_local, 'separator'):
+            separator_local.separator = models["separator"]
+        return separator_local.separator
+    
+    def process_single_uvr(audio_file: Path) -> Tuple[Path, bool, bool]:
+        """Process a single file with UVR, returns (output_file, success, was_skipped)."""
+        separator = get_separator()
+        return process_uvr_file(
+            audio_file,
+            separator,
+            output_audio_dir,
+            target_sample_rate
+        )
+    
+    # Process files in parallel using ThreadPoolExecutor
+    max_workers = min(uvr_workers, len(group_files))
+    skipped_count = 0
+    processed_count = 0
+    failed_count = 0
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_single_uvr, audio_file): audio_file 
+                   for audio_file in group_files}
+        
+        # Process completed tasks with progress indication
+        for future in tqdm(as_completed(futures), total=len(group_files), 
+                         desc=f"UVR {group_prefix}", leave=False, file=sys.stderr):
+            try:
+                uvr_file, success, was_skipped = future.result()
+                if success and uvr_file:
+                    if was_skipped:
+                        skipped_count += 1
+                    else:
+                        processed_count += 1
+                    uvr_files.append(uvr_file)
+                else:
+                    failed_count += 1
+            except Exception as e:
+                audio_file = futures[future]
+                print(f"Error processing {audio_file}: {e}", file=sys.stderr)
+                failed_count += 1
+    
+    if skipped_count > 0:
+        print(f"  Skipped {skipped_count} already-processed files", file=sys.stderr)
+    if processed_count > 0:
+        print(f"  Processed {processed_count} new files", file=sys.stderr)
+    if failed_count > 0:
+        print(f"  Failed {failed_count} files", file=sys.stderr)
     
     if not uvr_files:
         print(f"Warning: No files processed for group {group_prefix}", file=sys.stderr)
@@ -277,13 +337,58 @@ def process_group(
     return entries
 
 
-def generate_jsonl(entries: List[Dict[str, Any]], output_path: Path):
+def load_existing_jsonl_entries(jsonl_path: Path) -> set:
+    """
+    Load existing entry IDs from JSONL file to avoid duplicates.
+    Returns a set of entry IDs.
+    """
+    existing_ids = set()
+    if jsonl_path.exists():
+        try:
+            with open(jsonl_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        entry_id = entry.get("id")
+                        if entry_id:
+                            existing_ids.add(entry_id)
+                    except json.JSONDecodeError:
+                        continue
+        except Exception as e:
+            print(f"Warning: Error reading existing JSONL: {e}", file=sys.stderr)
+    return existing_ids
+
+
+def generate_jsonl(entries: List[Dict[str, Any]], output_path: Path, append: bool = False):
     """
     Generate JSONL file with entries matching webui format.
+    If append=True, append to existing file and skip duplicates.
     """
-    with open(output_path, 'w', encoding='utf-8') as f:
+    existing_ids = set()
+    if append and output_path.exists():
+        existing_ids = load_existing_jsonl_entries(output_path)
+    
+    mode = 'a' if append else 'w'
+    with open(output_path, mode, encoding='utf-8') as f:
+        new_count = 0
+        skipped_count = 0
         for entry in entries:
+            entry_id = entry.get("id")
+            if entry_id in existing_ids:
+                skipped_count += 1
+                continue
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            existing_ids.add(entry_id)
+            new_count += 1
+        
+        if skipped_count > 0:
+            print(f"  Skipped {skipped_count} duplicate entries", file=sys.stderr)
+        if new_count > 0:
+            print(f"  Added {new_count} new entries", file=sys.stderr)
 
 
 def main():
@@ -331,6 +436,12 @@ def main():
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device to use (cuda or cpu, default: auto-detect)"
+    )
+    parser.add_argument(
+        "--uvr-workers",
+        type=int,
+        default=4,
+        help="Number of parallel workers for UVR processing (default: 4)"
     )
     
     args = parser.parse_args()
@@ -422,7 +533,8 @@ def main():
             output_audio_dir,
             args.dir_name,
             args.silence_duration,
-            target_sample_rate
+            target_sample_rate,
+            args.uvr_workers
         )
         all_entries.extend(entries)
         print(f"Group {group_prefix}: Generated {len(entries)} entries.", file=sys.stderr)
