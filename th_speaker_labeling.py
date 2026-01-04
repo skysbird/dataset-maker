@@ -321,10 +321,11 @@ def process_group(
     for audio_file in group_files:
         segment_id = extract_segment_id_from_filename(audio_file)
         
-        # Get text from labels
+        # Get text from labels (should always exist since we filtered by TSV)
         text = labels.get(segment_id, "").strip()
         if not text:
-            print(f"Warning: No label found for {segment_id}, skipping", file=sys.stderr)
+            # This shouldn't happen if filtering worked correctly
+            print(f"Warning: No label found for {segment_id} (should have been filtered), skipping", file=sys.stderr)
             continue
         
         # Get speaker info from mapping
@@ -530,19 +531,38 @@ def main():
     # Get target sample rate from config
     target_sample_rate = cfg.get("entrypoint", {}).get("SAMPLE_RATE", 24000)
     
-    # Load TSV labels
+    # Load TSV labels first (this is our source of truth)
     print(f"Loading labels from {tsv_path}...", file=sys.stderr)
     labels = load_tsv_labels(tsv_path)
-    print(f"Loaded {len(labels)} labels.", file=sys.stderr)
+    print(f"Loaded {len(labels)} labels from TSV.", file=sys.stderr)
     
-    # Find and group audio files
+    # Load existing JSONL entries to skip already processed ones
+    jsonl_path = output_dir / f"{args.dir_name}_transcribed.jsonl"
+    existing_entry_ids = set()
+    if jsonl_path.exists():
+        print(f"Loading existing entries from {jsonl_path}...", file=sys.stderr)
+        existing_entry_ids = load_existing_jsonl_entries(jsonl_path)
+        print(f"Found {len(existing_entry_ids)} existing entries.", file=sys.stderr)
+    
+    # Find all audio files
     print(f"Finding audio files in {audio_dir}...", file=sys.stderr)
-    audio_files = find_audio_files(audio_dir)
-    print(f"Found {len(audio_files)} audio files.", file=sys.stderr)
+    all_audio_files = find_audio_files(audio_dir)
+    print(f"Found {len(all_audio_files)} audio files in directory.", file=sys.stderr)
+    
+    # Filter: only keep audio files that have labels in TSV
+    audio_files = []
+    for audio_file in all_audio_files:
+        segment_id = extract_segment_id_from_filename(audio_file)
+        if segment_id in labels:
+            # Also check if already processed
+            if segment_id not in existing_entry_ids:
+                audio_files.append(audio_file)
+    
+    print(f"Filtered to {len(audio_files)} files with labels (excluding {len(existing_entry_ids)} already processed).", file=sys.stderr)
     
     if not audio_files:
-        print("Error: No audio files found!", file=sys.stderr)
-        sys.exit(1)
+        print("No files to process (all files either missing labels or already processed).", file=sys.stderr)
+        sys.exit(0)
     
     groups = group_audio_files(audio_files)
     print(f"Grouped into {len(groups)} groups.", file=sys.stderr)
@@ -568,11 +588,11 @@ def main():
         print(f"Group {group_prefix}: Generated {len(entries)} entries.", file=sys.stderr)
     
     # Generate JSONL file (append mode to support resume)
-    jsonl_path = output_dir / f"{args.dir_name}_transcribed.jsonl"
-    print(f"\nGenerating JSONL file: {jsonl_path}", file=sys.stderr)
+    # jsonl_path is already defined above
+    print(f"\nWriting to JSONL file: {jsonl_path}", file=sys.stderr)
     generate_jsonl(all_entries, jsonl_path, append=True)
     
-    print(f"\nComplete! Processed {len(all_entries)} entries in {jsonl_path}", file=sys.stderr)
+    print(f"\nComplete! Added {len(all_entries)} new entries to {jsonl_path}", file=sys.stderr)
     print(f"Processed audio files saved to: {output_audio_dir}", file=sys.stderr)
 
 
