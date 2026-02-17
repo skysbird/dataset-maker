@@ -1025,6 +1025,7 @@ def transcribe_interface(project: str, language, silence_duration, purge_long_se
             )
 
         try:
+            from emilia_pipeline import run_emilia_pipeline  # 延迟导入，避免启动时 std::bad_alloc
             run_emilia_pipeline(
                 config_path,
                 input_folder=str(wavs_folder),
@@ -1760,9 +1761,7 @@ if __name__ == "__main__":
     from gradio_utils import utils as gu
     print("      OK", flush=True)
 
-    print("[5/5] emilia_pipeline ...", flush=True)
-    from emilia_pipeline import run_emilia_pipeline
-    print("      OK", flush=True)
+    # emilia_pipeline 延后到用户实际跑 Emilia Pipe 时再导入，避免启动时 pyannote 导致 std::bad_alloc
     # =============================================================================
     # Global Project Folder
     # =============================================================================
