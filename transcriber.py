@@ -8,8 +8,7 @@ import numpy as np
 import librosa
 import soundfile as sf
 import pysrt
-import safe_globals  # 必须在 whisperx 之前，避免 torch 反序列化时 std::bad_alloc
-import whisperx
+import safe_globals  # 必须在首次使用 whisperx 前已导入，避免 torch 反序列化时 std::bad_alloc
 import gc
 import time
 
@@ -32,10 +31,12 @@ WHISPERX_VAD_TRAIL_BUFFER_SEC = 0.2
 
 def load_whisperx_model(model_name="large-v2"):
     """Load and return the WhisperX model on CUDA (float16)."""
+    import whisperx  # 延迟导入，避免启动时 std::bad_alloc
     asr_options = {"initial_prompt": '"No! We must not be pushed back," he replied back. "Keep on fighting to your very deaths!"'}
     return whisperx.load_model(model_name, device="cuda", compute_type="float16", asr_options=asr_options)
 
 def run_whisperx_transcription(audio_path, output_dir, language="en", chunk_size=20, no_align=False, model=None, batch_size=16):
+    import whisperx  # 延迟导入，避免启动时 std::bad_alloc
     print(f"DEBUG: Running WhisperX transcription on {audio_path}...")
     audio = whisperx.load_audio(str(audio_path))
     if language == "None":
@@ -288,6 +289,7 @@ def _slice_audio_with_silence(audio_file, model, subfolder, y, sr, silence_durat
 def _slice_audio_with_whisperx(audio_file, subfolder, y, sr, model, language,
                                purge_long_segments, max_segment_length, verbose_mode,
                                starting_index, chunk_size, batch_size):
+    import whisperx  # 延迟导入，避免启动时 std::bad_alloc
     print("DEBUG: Using WhisperX timestamps for slicing.")
     total_samples = y.shape[1] if y.ndim > 1 else y.shape[0]
     audio_duration = total_samples / sr
