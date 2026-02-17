@@ -28,9 +28,9 @@ dependencies = [
     "soundfile>=0.13.1",
     "starlette==0.38.2",
     "torch>=2.8.0",
-    "torchcodec==0.8",
+    "torchcodec==0.7.0",
     "urllib3==2.3",
-    "whisperx>=3.3.4",
+    #"whisperx>=3.3.4",
 ]
 
 [tool.uv]
@@ -43,7 +43,7 @@ override-dependencies = [
 
 [tool.uv.sources]
 gradio-utils = { git = "https://github.com/JarodMica/gradio_utils.git" }
-whisperx = { git = "https://github.com/m-bain/whisperX.git", rev = "44e8bf5bb658ad6e1a80585b987fae2d48b9662c" }
+#whisperx = { git = "https://github.com/m-bain/whisperX.git", rev = "44e8bf5bb658ad6e1a80585b987fae2d48b9662c" }
 torch = [
   { index = "pytorch-cu128", extra = "cu128" },
 ]
@@ -69,5 +69,5 @@ explicit = true
 
 [[tool.uv.index]]
 name = "aliyun"
-#url = "https://mirrors.aliyun.com/pypi/simple/"
-url = "http://mirrors.cloud.aliyuncs.com/pypi/simple/" # 内网
+url = "https://mirrors.aliyun.com/pypi/simple/"
+#url = "http://mirrors.cloud.aliyuncs.com/pypi/simple/" # 内网
