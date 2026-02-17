@@ -1,3 +1,6 @@
+# 若出现 std::bad_alloc 且无后续 [1/5] 等输出，则崩溃在 import gradio
+import sys
+print("gradio_interface: loading (import gradio) ...", flush=True)
 import gradio as gr
 import logging
 import json
@@ -1735,20 +1738,31 @@ if __name__ == "__main__":
         _p.parse_args()
         sys.exit(0)
 
-    # 必须最先注册 torch safe_globals，再导入任何会加载模型的模块，否则可能触发 std::bad_alloc。
-    # 若仍出现 std::bad_alloc，多为内存不足：可换小一点 Whisper 模型、增大机器内存或设置
-    # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    # 逐步导入并打印，崩溃时最后一行即失败步骤
     _script_dir = Path(__file__).resolve().parent
     if str(_script_dir) not in sys.path:
         sys.path.insert(0, str(_script_dir))
+
+    print("[1/5] safe_globals ...", flush=True)
     from safe_globals import register_torch_safe_globals
     register_torch_safe_globals()
+    print("      OK", flush=True)
 
-    # 之后再导入会加载 torch/whisperx/pyannote 的模块
+    print("[2/5] transcriber (whisperx) ...", flush=True)
     import transcriber
+    print("      OK", flush=True)
+
+    print("[3/5] llm_reformatter_script ...", flush=True)
     import llm_reformatter_script
+    print("      OK", flush=True)
+
+    print("[4/5] gradio_utils ...", flush=True)
     from gradio_utils import utils as gu
+    print("      OK", flush=True)
+
+    print("[5/5] emilia_pipeline ...", flush=True)
     from emilia_pipeline import run_emilia_pipeline
+    print("      OK", flush=True)
     # =============================================================================
     # Global Project Folder
     # =============================================================================
@@ -1778,4 +1792,5 @@ if __name__ == "__main__":
         
     }
     DEFAULT_SLICE_METHOD_LABEL = "WhisperX Timestamps"
+    print("All imports OK, starting Gradio ...", flush=True)
     main()
