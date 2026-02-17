@@ -4,12 +4,25 @@
 # LICENSE file in the root directory of this source tree.
 
 import faster_whisper
-from typing import List, Union, Optional, NamedTuple
+from typing import List, Union, Optional, NamedTuple, TypedDict
 import torch
 import numpy as np
 import tqdm
 from whisperx.audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
-from whisperx.types import TranscriptionResult, SingleSegment
+try:
+    from whisperx.types import TranscriptionResult, SingleSegment
+except ModuleNotFoundError:
+    # 兼容旧版 whisperx（无 whisperx.types 子模块）
+    class SingleSegment(TypedDict, total=False):
+        start: float
+        end: float
+        text: str
+        speaker: Optional[str]
+
+    class TranscriptionResult(TypedDict):
+        segments: List[SingleSegment]
+        language: str
+
 from whisperx.asr import WhisperModel, FasterWhisperPipeline, find_numeral_symbol_tokens
 
 
