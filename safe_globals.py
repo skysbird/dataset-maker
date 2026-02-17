@@ -1,8 +1,8 @@
 """
-Central registration for objects required by torch.load during Whisper/Emilia deserialization.
+Central registration for torch.load 反序列化所需符号，避免 std::bad_alloc。
 
-- 启动时只注册「核心」符号（torch、omegaconf、builtins），不加载 pyannote，避免 std::bad_alloc。
-- 使用 Emilia（pyannote）前需调用 register_pyannote_safe_globals()。
+- 导入时只注册核心符号（torch、omegaconf、builtins），不导入 pyannote。
+- Emilia 在加载 diarization 模型前会调用 register_pyannote_safe_globals()，再导入 pyannote。
 """
 
 from __future__ import annotations

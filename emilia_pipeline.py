@@ -33,21 +33,13 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 import librosa
 import numpy as np
 import pandas as pd
-import pyannote
 import torch
 import torch.serialization
 import tqdm
 from pydub import AudioSegment
-from pyannote.audio import Pipeline
-from pyannote.audio.core.task import Resolution
 import soundfile as sf
 
-torch.serialization.add_safe_globals([torch.torch_version.TorchVersion])
-torch.serialization.add_safe_globals([pyannote.audio.core.task.Specifications])
-torch.serialization.add_safe_globals([pyannote.audio.core.task.Problem])
-torch.serialization.add_safe_globals([torch.torch_version.TorchVersion, Resolution])
-
-import safe_globals  # Ensure torch safe globals registered before loading checkpoints.
+import safe_globals  # 核心符号已注册；pyannote 在加载 diarization 前再注册，避免启动时 std::bad_alloc
 
 from Emilia.models import dnsmos, silero_vad, whisper_asr
 from infer_uvr import UVRSeparator
@@ -253,7 +245,7 @@ def separate_sources(
 
 @time_logger
 def diarise_speakers(
-    pipeline: Pipeline, audio: AudioDict, device: torch.device
+    pipeline: Any, audio: AudioDict, device: torch.device
 ) -> pd.DataFrame:
     """Run speaker diarisation returning a dataframe with segment metadata."""
     waveform = torch.tensor(audio["waveform"], device=device).unsqueeze(0)
@@ -758,6 +750,10 @@ def prepare_models(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, A
         raise ValueError(
             "A valid Hugging Face token is required for pyannote diarisation."
         )
+
+    # 仅在此时导入并注册 pyannote，避免模块顶层导入导致 std::bad_alloc
+    safe_globals.register_pyannote_safe_globals()
+    from pyannote.audio import Pipeline
 
     diarisation = Pipeline.from_pretrained(
         # "pyannote/speaker-diarization-3.1",
