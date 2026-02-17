@@ -8,8 +8,8 @@ import numpy as np
 import librosa
 import soundfile as sf
 import pysrt
+import safe_globals  # 必须在 whisperx 之前，避免 torch 反序列化时 std::bad_alloc
 import whisperx
-import safe_globals  # Ensure torch safe globals are registered before model deserialization.
 import gc
 import time
 

@@ -1675,22 +1675,26 @@ def main():
 
 if __name__ == "__main__":
     import os
+    import sys
     import shutil
     from pathlib import Path
     import multiprocessing
     import datetime
 
-    # Import your existing modules.
+    # 必须最先注册 torch safe_globals，再导入任何会加载模型的模块，否则可能触发 std::bad_alloc。
+    # 若仍出现 std::bad_alloc，多为内存不足：可换小一点 Whisper 模型、增大机器内存或设置
+    # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    _script_dir = Path(__file__).resolve().parent
+    if str(_script_dir) not in sys.path:
+        sys.path.insert(0, str(_script_dir))
+    from safe_globals import register_torch_safe_globals
+    register_torch_safe_globals()
+
+    # 之后再导入会加载 torch/whisperx/pyannote 的模块
     import transcriber
     import llm_reformatter_script
-
-    # Import your custom utilities.
     from gradio_utils import utils as gu
     from emilia_pipeline import run_emilia_pipeline
-    
-    from safe_globals import register_torch_safe_globals
-
-    register_torch_safe_globals()
     # =============================================================================
     # Global Project Folder
     # =============================================================================
