@@ -41,7 +41,6 @@ import soundfile as sf
 
 import safe_globals  # 核心符号已注册；pyannote 在加载 diarization 前再注册，避免启动时 std::bad_alloc
 
-from Emilia.models import dnsmos, silero_vad, whisper_asr
 from infer_uvr import UVRSeparator
 from Emilia.utils.logger import Logger, time_logger
 from Emilia.utils.tool import (
@@ -350,7 +349,7 @@ def merge_vad_segments(
 
 @time_logger
 def run_asr(
-    model: whisper_asr.VadFreeFasterWhisperPipeline,
+    model: Any,
     segments: List[Segment],
     audio: AudioDict,
     *,
@@ -472,7 +471,7 @@ def run_asr(
 
 @time_logger
 def score_segments(
-    scorer: dnsmos.ComputeScore, audio: AudioDict, segments: List[Segment], base_sr: int
+    scorer: Any, audio: AudioDict, segments: List[Segment], base_sr: int
 ) -> Tuple[float, List[Segment]]:
     """Attach DNSMOS scores to each segment and return the average."""
     if not segments:
@@ -708,6 +707,9 @@ def process_audio(
 def prepare_models(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     """Load all required models based on the configuration."""
     logger = Logger.get_logger()
+
+    # 延后导入，避免 import emilia_pipeline 时加载 whisperx -> pyannote -> torchcodec 导致 std::bad_alloc
+    from Emilia.models import dnsmos, silero_vad, whisper_asr
 
     cache_root = Path(
         cfg.get("download_cache")
