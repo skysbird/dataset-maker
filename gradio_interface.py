@@ -1673,6 +1673,44 @@ def main():
         share=args.share,
     )
 
+def _diagnose_imports():
+    """逐步导入并打印内存，用于定位 std::bad_alloc 发生的步骤。用法: python gradio_interface.py --diagnose"""
+    import sys
+    from pathlib import Path
+
+    def mem_mb():
+        try:
+            import resource
+            r = resource.getrusage(resource.RUSAGE_SELF)
+            return getattr(r, "ru_maxrss", 0) // 1024  # Linux 单位 KB -> MB
+        except Exception:
+            try:
+                import psutil
+                return psutil.Process().memory_info().rss // (1024 * 1024)
+            except Exception:
+                return 0
+
+    def step(n, total, name, fn):
+        print(f"[{n}/{total}] {name} ... ", end="", flush=True)
+        fn()
+        print(f"OK (RSS ~{mem_mb()} MB)", flush=True)
+
+    _script_dir = Path(__file__).resolve().parent
+    if str(_script_dir) not in sys.path:
+        sys.path.insert(0, str(_script_dir))
+
+    total = 6
+    step(1, total, "safe_globals", lambda: __import__("safe_globals").register_torch_safe_globals())
+    step(2, total, "transcriber (含 whisperx)", lambda: __import__("transcriber"))
+    step(3, total, "llm_reformatter_script", lambda: __import__("llm_reformatter_script"))
+    step(4, total, "gradio_utils", lambda: __import__("gradio_utils").utils)
+    step(5, total, "emilia_pipeline", lambda: __import__("emilia_pipeline").run_emilia_pipeline)
+    step(6, total, "gradio (gr)", lambda: __import__("gradio", fromlist=["gr"]))
+
+    print("All imports OK. 若正常启动仍 bad_alloc，可能是启动时加载模型导致，可尝试更小 Whisper 或更大内存。", flush=True)
+    print("若某步后崩溃，最后一行 [N/M] 即为触发 std::bad_alloc 的步骤。", flush=True)
+
+
 if __name__ == "__main__":
     import os
     import sys
@@ -1680,6 +1718,22 @@ if __name__ == "__main__":
     from pathlib import Path
     import multiprocessing
     import datetime
+
+    # --diagnose: 逐步导入以定位 std::bad_alloc，不加载完整界面
+    if "--diagnose" in sys.argv:
+        sys.argv.remove("--diagnose")
+        _diagnose_imports()
+        sys.exit(0)
+    # --help/-h: 仅打印帮助，避免为解析参数而加载重型模块
+    if "--help" in sys.argv or "-h" in sys.argv:
+        import argparse
+        _p = argparse.ArgumentParser(description="Gradio 转录与修正界面")
+        _p.add_argument("--diagnose", action="store_true", help="逐步导入并打印内存，用于定位 std::bad_alloc 的步骤，然后退出")
+        _p.add_argument("--server-name", type=str, default=None, help="绑定地址，0.0.0.0 表示所有网卡")
+        _p.add_argument("--server-port", type=int, default=None, help="端口")
+        _p.add_argument("--share", action="store_true", help="创建公网分享链接")
+        _p.parse_args()
+        sys.exit(0)
 
     # 必须最先注册 torch safe_globals，再导入任何会加载模型的模块，否则可能触发 std::bad_alloc。
     # 若仍出现 std::bad_alloc，多为内存不足：可换小一点 Whisper 模型、增大机器内存或设置
