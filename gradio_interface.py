@@ -639,6 +639,18 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
                     except:
                         webui_connected = False
                 combined = np.concatenate(parts)
+                # Build manifest: one segment per original file (parts = [data0, silence, data1, ...], last is data)
+                manifest_segments = []
+                for i in range(len(batch)):
+                    start_samples = sum(parts[j].shape[0] for j in range(2 * i))
+                    n_samples = parts[2 * i].shape[0]
+                    start_sec = start_samples / sr
+                    end_sec = start_sec + n_samples / sr
+                    manifest_segments.append({
+                        "file": batch[i].name,
+                        "start_sec": round(start_sec, 4),
+                        "end_sec": round(end_sec, 4),
+                    })
                 # Write combined audio
                 print(f"[Console]     Writing {out_name}...", file=sys.stderr)
                 if webui_connected:
@@ -650,6 +662,10 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
                     except:
                         webui_connected = False
                 sf.write(str(output_path), combined, sr)
+                # Write manifest for sentence-unit splitting (same dir, stem_manifest.json)
+                manifest_path = output_path.parent / (output_path.stem + "_manifest.json")
+                with open(manifest_path, "w", encoding="utf-8") as mf:
+                    json.dump({"sample_rate": int(sr), "segments": manifest_segments}, mf, indent=2)
                 # Report progress
                 duration_sec = combined.shape[0] // sr
                 file_size_mb = output_path.stat().st_size / (1024 * 1024)

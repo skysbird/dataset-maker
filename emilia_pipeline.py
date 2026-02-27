@@ -704,6 +704,116 @@ def process_audio(
     return manifest, filtered
 
 
+def _speaker_for_interval(diarise_df: pd.DataFrame, start_sec: float, end_sec: float) -> str:
+    """Assign speaker to [start_sec, end_sec] by maximum overlap with diarisation segments."""
+    if diarise_df is None or len(diarise_df) == 0:
+        return "SPEAKER_UNKNOWN"
+    overlap = []
+    for _, row in diarise_df.iterrows():
+        seg_start, seg_end = float(row["start"]), float(row["end"])
+        o_start = max(seg_start, start_sec)
+        o_end = min(seg_end, end_sec)
+        if o_end > o_start:
+            overlap.append((row["speaker"], o_end - o_start))
+    if not overlap:
+        return "SPEAKER_UNKNOWN"
+    by_speaker: Dict[str, float] = {}
+    for spk, dur in overlap:
+        by_speaker[spk] = by_speaker.get(spk, 0.0) + dur
+    return max(by_speaker, key=by_speaker.get)
+
+
+def process_audio_with_manifest(
+    audio_path: Path,
+    manifest_path: Path,
+    *,
+    save_root: Path,
+    sample_rate: int,
+    models: Dict[str, Any],
+    multilingual: bool,
+    supported_languages: List[str],
+    batch_size: int,
+    filter_settings: Dict[str, Any],
+    forced_language: Optional[str] = None,
+    hash_names: bool = False,
+) -> Tuple[Path, List[Segment]]:
+    """Run Emilia with segment boundaries from a combine manifest (sentence-unit splitting)."""
+    logger = Logger.get_logger()
+
+    output_name = _derive_output_name(audio_path, hash_names)
+    if hash_names:
+        logger.info("Hashing basename %s -> %s", audio_path.stem, output_name)
+
+    output_dir = save_root / output_name
+    debug_dir = output_dir / "debug"
+    if debug_dir.exists():
+        shutil.rmtree(debug_dir)
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_waveform, raw_sample_rate = librosa.load(str(audio_path), sr=None, mono=True)
+    write_debug_audio(debug_dir / "step0_original.wav", raw_waveform, raw_sample_rate)
+
+    if models["separator"]:
+        audio = separate_sources(models["separator"], str(audio_path), sample_rate)
+        audio["name"] = f"{output_name}{audio_path.suffix}"
+        write_debug_audio(debug_dir / "step1_vocals.wav", audio["waveform"], sample_rate)
+    else:
+        logger.info("UVR separator not configured; using original audio for downstream steps.")
+        if raw_sample_rate != sample_rate:
+            vocal_waveform = librosa.resample(raw_waveform, orig_sr=raw_sample_rate, target_sr=sample_rate)
+        else:
+            vocal_waveform = raw_waveform
+        vocal_normalized, norm_sr = normalize_waveform(vocal_waveform, sample_rate, sample_rate)
+        audio = {
+            "waveform": vocal_normalized,
+            "sample_rate": norm_sr,
+            "name": f"{output_name}{audio_path.suffix}",
+        }
+        write_debug_audio(debug_dir / "step1_vocals.wav", audio["waveform"], norm_sr)
+
+    with manifest_path.open("r", encoding="utf-8") as f:
+        manifest_data = json.load(f)
+    manifest_segments = manifest_data.get("segments", [])
+    manifest_sr = manifest_data.get("sample_rate", sample_rate)
+    if manifest_sr != sample_rate:
+        logger.warning(
+            "Manifest sample_rate %s != pipeline %s; using manifest times as seconds.",
+            manifest_sr,
+            sample_rate,
+        )
+
+    logger.info("Running diarization...")
+    diarisation = diarise_speakers(models["diarisation"], audio, models["device"])
+    logger.info("process_audio_with_manifest: diarization produced %d segments.", len(diarisation))
+
+    segments: List[Segment] = []
+    for seg_in in manifest_segments:
+        start_sec = float(seg_in["start_sec"])
+        end_sec = float(seg_in["end_sec"])
+        speaker = _speaker_for_interval(diarisation, start_sec, end_sec)
+        segments.append({
+            "start": start_sec,
+            "end": end_sec,
+            "speaker": speaker,
+        })
+
+    logger.info("process_audio_with_manifest: %d manifest segments, running ASR...", len(segments))
+    transcripts = run_asr(
+        models["asr"],
+        segments,
+        audio,
+        multilingual=multilingual,
+        supported_languages=supported_languages,
+        batch_size=batch_size,
+        forced_language=forced_language,
+    )
+    _, scored_segments = score_segments(models["dnsmos"], audio, transcripts, sample_rate)
+    filtered = filter_segments(scored_segments, filter_settings)
+    logger.info("process_audio_with_manifest: final kept segments: %d.", len(filtered))
+    out_manifest = export_results(audio, filtered, output_dir)
+    return out_manifest, filtered
+
+
 def prepare_models(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     """Load all required models based on the configuration."""
     logger = Logger.get_logger()
@@ -980,18 +1090,34 @@ def run_emilia_pipeline(
     for audio_path in audio_paths:
         logger.info("Processing %s", audio_path)
         output_root = audio_path.parent.parent / f"{audio_path.parent.name}_processed"
-        manifest, segments = process_audio(
-            audio_path,
-            save_root=output_root,
-            sample_rate=sample_rate,
-            models=models,
-            multilingual=multilingual,
-            supported_languages=supported_languages,
-            batch_size=batch_size,
-            filter_settings=filter_settings,
-            forced_language=forced_language,
-            hash_names=hash_names,
-        )
+        manifest_file_path = audio_path.parent / (audio_path.stem + "_manifest.json")
+        if manifest_file_path.exists():
+            manifest, segments = process_audio_with_manifest(
+                audio_path,
+                manifest_file_path,
+                save_root=output_root,
+                sample_rate=sample_rate,
+                models=models,
+                multilingual=multilingual,
+                supported_languages=supported_languages,
+                batch_size=batch_size,
+                filter_settings=filter_settings,
+                forced_language=forced_language,
+                hash_names=hash_names,
+            )
+        else:
+            manifest, segments = process_audio(
+                audio_path,
+                save_root=output_root,
+                sample_rate=sample_rate,
+                models=models,
+                multilingual=multilingual,
+                supported_languages=supported_languages,
+                batch_size=batch_size,
+                filter_settings=filter_settings,
+                forced_language=forced_language,
+                hash_names=hash_names,
+            )
         logger.info(
             "Saved %d filtered segments to %s",
             len(segments),
