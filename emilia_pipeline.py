@@ -723,6 +723,10 @@ def _speaker_for_interval(diarise_df: pd.DataFrame, start_sec: float, end_sec: f
     return max(by_speaker, key=by_speaker.get)
 
 
+# WhisperX expects input duration <= 30s (3000 mel frames); longer segments cause "Invalid input features shape"
+MAX_ASR_DURATION_SEC = 30.0
+
+
 def process_audio_with_manifest(
     audio_path: Path,
     manifest_path: Path,
@@ -782,6 +786,28 @@ def process_audio_with_manifest(
             sample_rate,
         )
 
+    # Optional: load one project-wide annotations file (annotations.jsonl in same dir as combined wav)
+    annotations_by_file: Dict[str, Tuple[str, str]] = {}  # file -> (text, language)
+    annotations_path = audio_path.parent / "annotations.jsonl"
+    if annotations_path.exists():
+        with annotations_path.open("r", encoding="utf-8") as af:
+            for line in af:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    key = (obj.get("source") or obj.get("audio") or "").strip()
+                    if key and isinstance(key, str):
+                        key = Path(key).name
+                    if key:
+                        text_val = (obj.get("text") or "").strip()
+                        lang_val = (obj.get("language") or "").strip() or "unknown"
+                        annotations_by_file[key] = (text_val, lang_val)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+        logger.info("Loaded %d entries from %s", len(annotations_by_file), annotations_path.name)
+
     logger.info("Running diarization...")
     diarisation = diarise_speakers(models["diarisation"], audio, models["device"])
     logger.info("process_audio_with_manifest: diarization produced %d segments.", len(diarisation))
@@ -791,23 +817,38 @@ def process_audio_with_manifest(
         start_sec = float(seg_in["start_sec"])
         end_sec = float(seg_in["end_sec"])
         speaker = _speaker_for_interval(diarisation, start_sec, end_sec)
+        file_key = seg_in.get("file", "")
+        if file_key in annotations_by_file:
+            text, lang = annotations_by_file[file_key]
+        else:
+            text = (seg_in.get("text") or "").strip()
+            lang = "unknown"
         segments.append({
             "start": start_sec,
             "end": end_sec,
             "speaker": speaker,
+            "text": text,
+            "language": (forced_language or "").strip() or lang,
         })
 
-    logger.info("process_audio_with_manifest: %d manifest segments, running ASR...", len(segments))
-    # Use batch_size=1 so WhisperX never stacks segments of different lengths (manifest segments vary in duration)
-    transcripts = run_asr(
-        models["asr"],
-        segments,
-        audio,
-        multilingual=multilingual,
-        supported_languages=supported_languages,
-        batch_size=1,
-        forced_language=forced_language,
-    )
+    # If every segment has original text (from manifest or annotations), skip ASR
+    if all(s.get("text") for s in segments):
+        logger.info("process_audio_with_manifest: %d manifest segments with original text, skipping ASR.", len(segments))
+        for s in segments:
+            if "language" not in s or not (s.get("language") or "").strip():
+                s["language"] = (forced_language or "").strip() or "unknown"
+        transcripts = segments
+    else:
+        logger.info("process_audio_with_manifest: %d manifest segments, running ASR...", len(segments))
+        transcripts = run_asr(
+            models["asr"],
+            segments,
+            audio,
+            multilingual=multilingual,
+            supported_languages=supported_languages,
+            batch_size=1,
+            forced_language=forced_language,
+        )
     _, scored_segments = score_segments(models["dnsmos"], audio, transcripts, sample_rate)
     filtered = filter_segments(scored_segments, filter_settings)
     logger.info("process_audio_with_manifest: final kept segments: %d.", len(filtered))

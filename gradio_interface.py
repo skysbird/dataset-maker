@@ -640,17 +640,25 @@ def combine_all_samples(project: str, progress_callback=gr.Progress()):
                         webui_connected = False
                 combined = np.concatenate(parts)
                 # Build manifest: one segment per original file (parts = [data0, silence, data1, ...], last is data)
+                # If a same-name .txt exists next to each wav, include it as "text" for use as original annotation
                 manifest_segments = []
                 for i in range(len(batch)):
                     start_samples = sum(parts[j].shape[0] for j in range(2 * i))
                     n_samples = parts[2 * i].shape[0]
                     start_sec = start_samples / sr
                     end_sec = start_sec + n_samples / sr
-                    manifest_segments.append({
+                    entry = {
                         "file": batch[i].name,
                         "start_sec": round(start_sec, 4),
                         "end_sec": round(end_sec, 4),
-                    })
+                    }
+                    txt_path = batch[i].parent / (batch[i].stem + ".txt")
+                    if txt_path.exists():
+                        try:
+                            entry["text"] = txt_path.read_text(encoding="utf-8").strip()
+                        except Exception:
+                            pass
+                    manifest_segments.append(entry)
                 # Write combined audio
                 print(f"[Console]     Writing {out_name}...", file=sys.stderr)
                 if webui_connected:
