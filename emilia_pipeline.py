@@ -798,13 +798,14 @@ def process_audio_with_manifest(
         })
 
     logger.info("process_audio_with_manifest: %d manifest segments, running ASR...", len(segments))
+    # Use batch_size=1 so WhisperX never stacks segments of different lengths (manifest segments vary in duration)
     transcripts = run_asr(
         models["asr"],
         segments,
         audio,
         multilingual=multilingual,
         supported_languages=supported_languages,
-        batch_size=batch_size,
+        batch_size=1,
         forced_language=forced_language,
     )
     _, scored_segments = score_segments(models["dnsmos"], audio, transcripts, sample_rate)
